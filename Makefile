@@ -151,4 +151,4 @@ lint-fu: clean test-setup
 coverage-all-fus: clean test-setup
 	nix-shell --run "make -C ../versat_ai_V0.8/hardware/simulation/coverage all"
 
-.PHONY: make-python-env make-versat-accel setup full-clean clean python-cache-clean
+.PHONY: make-python-env make-versat-accel setup clean python-cache-clean

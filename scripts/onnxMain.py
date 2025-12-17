@@ -585,8 +585,8 @@ def GenerateDebug(
 
     CalculateMemoryAllocations(cModel)
 
-    for c in cModel.operations:
-        print(c.opName, c.inputDimensions)
+    for i, c in enumerate(cModel.operations):
+        print(i, c.opName, c.inputDimensions)
 
     debugging = True
     with open(os.path.join(sourceOutputLocation, f"{namespace}_code.c"), "w") as f:
@@ -694,8 +694,8 @@ def GenerateDebug(
 
                 opIndex = opSeen.get(c.opName, -1) + 1
                 opSeen[c.opName] = opIndex
-                if debugging:
-                    f.write(f'  versat_printf("Gonna run layer {index}\\n");\n')
+                # if debugging:
+                #    f.write(f'  versat_printf("Gonna run layer {index}\\n");\n')
 
                 if measureTime:
                     f.write(f"  {namespace}_time[{index}] = versat_time();\n")

@@ -64,6 +64,8 @@ def MakeAttrAxisPairList(defaultValue):
 def MakeAttrInteger(defaultValue):
     return OnnxAttribute(OnnxAttributeType.INTEGER, [], defaultValue)
 
+def MakeAttrFloat(defaultValue):
+    return OnnxAttribute(OnnxAttributeType.FLOAT, [], defaultValue)
 
 # Some attributes have defaults that depend on the operator (like the size of the spatial axis and such)
 # This function essentially instantiates default values such that outer code does not have to check if an attributes exists or not.
@@ -206,7 +208,7 @@ def EmitReshape(emitter, op: Operation):
 def EmitMatMul(emitter, op: Operation):
     op0 = op.inputDimensions[0]
     op1 = op.inputDimensions[1]
-    res = [op0[0], op1[1]]
+    res = op.outputDimensions
 
     aux_0 = emitter.EmitArray("int64_t", op0)
     aux_1 = emitter.EmitArray("int64_t", op1)
@@ -234,6 +236,15 @@ def EmitTranspose(emitter, op: Operation):
 
     return [inputShape, dims, permShape, len(perm)]
 
+def EmitBatchNormalization(emitter, op: Operation):
+    dims = len(op.inputDimensions[0])
+    inputShape = emitter.EmitArray("int64_t", op.inputDimensions[0])
+
+    attr = GetAttributesForOperator(op)
+    epsilon = attr["epsilon"].value
+    momentum = attr["momentum"].value
+
+    return [inputShape,dims,epsilon,momentum]
 
 def IsOperatorRegistered(opName: str):
     return opName in operatorNameToSpec
@@ -297,6 +308,11 @@ transposeAttributes = {
     )  # TODO: Implement this when needed. Basically receive an Operation and return the default value
 }
 
+batchNormalizationAttributes = {
+    "epsilon": MakeAttrFloat(1e-5),
+    "momentum": MakeAttrFloat(0.9),
+    "training_mode": MakeAttrInteger(0)
+}
 
 def GetOperatorSpec(opName):
     global operatorNameToSpec
@@ -327,6 +343,8 @@ def OperationToLayerName(op: Operation, useVersat: bool):
 
 # Register new operators here
 # Remember, currently we only care about supporting up to version 7 operators.
+
+# name,emitFunction,attributesDict,supportedByVersat,broadcastType
 operatorNameToSpec = {}
 operatorNameToSpec["Add"] = OnnxOperatorSpec(
     "Add", EmitAdd, [], True, BroadcastType.UNIDIRECTIONAL
@@ -346,4 +364,7 @@ operatorNameToSpec["Softmax"] = OnnxOperatorSpec(
 )
 operatorNameToSpec["Transpose"] = OnnxOperatorSpec(
     "Transpose", EmitTranspose, transposeAttributes, False
+)
+operatorNameToSpec["BatchNormalization"] = OnnxOperatorSpec(
+    "BatchNormalization",EmitBatchNormalization,batchNormalizationAttributes,True
 )

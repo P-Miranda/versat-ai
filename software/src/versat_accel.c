@@ -214,7 +214,7 @@ void *Versat_Add(void *inputA, void *inputB, void *output, int index,
   Dimensions left = CreateDimensions(l, d);
   Dimensions right = CreateDimensions(r, d);
 
-  if (Dimensions_Size(left) < Dimensions_Size(right)) {
+  if (Dimensions_TotalSize(left) < Dimensions_TotalSize(right)) {
     SWAP(void *, inputA, inputB);
     SWAP(Dimensions, left, right);
     SWAP(int64_t *, l, r);
@@ -453,26 +453,46 @@ void ConvWithBias_ProcessWindow(AdvancedWindow w, void *inputX, void *inputW,
 
   int featuresComputedPerRun = 1;
 
+  Top_Conv_Features(inputX, w.inputX, w.inputY, w.actualKernelW,
+                    w.actualKernelH, inputImageW, inputImageC, convChannelSize,
+                    featuresComputedPerRun, convStartC);
+
+#if 0
   Conv2D_NHWC_VRead(&config->features, inputX, w.inputX, w.inputY,
                     w.actualKernelW, w.actualKernelH, inputImageW, inputImageC,
                     convChannelSize, featuresComputedPerRun, convStartC);
+#endif
 
+  Top_Conv_Weight2D(inputW, w.kernelStartW, w.kernelStartH, w.actualKernelW,
+                    w.actualKernelH, kernelW, kernelH, inputImageC,
+                    kernelChannelSize, featuresComputedPerRun, convStartC,
+                    outputStartC);
+
+#if 0
   Weight2D_VRead(&config->weights, inputW, w.kernelStartW, w.kernelStartH,
                  w.actualKernelW, w.actualKernelH, kernelW, kernelH,
                  inputImageC, kernelChannelSize, featuresComputedPerRun,
                  convStartC, outputStartC);
+#endif
 
+  Top_Conv_Output(output, w.outputX, w.outputY, w.outputH, w.outputW, w.startC,
+                  outputC, featuresComputedPerRun, outputImageW, stride);
+
+#if 0
   // Only outputs one now.
   Linear2_NHWC_VWrite(&config->output, output, w.outputX, w.outputY, w.outputH,
                       w.outputW, w.startC, outputC, featuresComputedPerRun,
                       outputImageW, stride);
+#endif
 
   if (bias == NULL) {
     static float bias = 0.0f;
-    LinearStrided_VRead(&config->bias, &bias, 1, 1);
+    // LinearStrided_VRead(&config->bias, &bias, 1, 1);
+    Top_Conv_Bias(&bias, 1, 1);
   } else {
-    LinearStrided_VRead(&config->bias, bias + outputStartC,
-                        featuresComputedPerRun, stride);
+    // LinearStrided_VRead(&config->bias, bias + outputStartC,
+    // featuresComputedPerRun, stride);
+    Top_Conv_Bias(bias + outputStartC, featuresComputedPerRun, stride);
   }
 
   config->myAccum.strideMinusOne = stride - 1;
@@ -543,7 +563,7 @@ void *Versat_ConvWithBias(void *inputX, void *inputW, void *inputB,
 
     Tensor_CheckCanary(tempInputTensor);
 
-    int kernelSize = Dimensions_Size(CreateDimensions(kernelDims, 4));
+    int kernelSize = Dimensions_TotalSize(CreateDimensions(kernelDims, 4));
 
     float *tempInput = tempInputTensor.data;
     float *tempOutput = tempOutputTensor.data;
@@ -579,7 +599,7 @@ void *Versat_ConvWithBias(void *inputX, void *inputW, void *inputB,
       Dimensions dims = CreateDimensions(info->inputDims, 4);
       dims.data[1] /= group;
 
-      int size = Dimensions_Size(dims);
+      int size = Dimensions_TotalSize(dims);
 
       Dimensions outDims = CreateDimensions(info->outputDims, 4);
       outDims.data[1] /= group;
@@ -697,52 +717,119 @@ void *Versat_MatMul(void *inputA, void *inputB, void *output, int index,
   ActivateMergedAccelerator(MergeType_Top_MatMul);
   volatile Top_MatMulConfig *config = &accelConfig->Top_MatMul;
 
-  int totalBSize = info->inputBDims[0] * info->inputBDims[1];
-
-  float *tempB = (float *)malloc(sizeof(float) * totalBSize);
-
   float *viewA = (float *)inputA;
   float *viewB = (float *)inputB;
   float *viewOut = (float *)output;
 
-  int AH = info->inputADims[0];
-  int AW = info->inputADims[1];
+  int AS = info->numberInputADims;
+  int AH;
+  int AW;
+  if (AS == 1) {
+    AH = 1;
+    AW = info->inputADims[0];
+  } else {
+    AH = info->inputADims[AS - 2];
+    AW = info->inputADims[AS - 1];
+  }
 
-  int BH = info->inputBDims[0];
-  int BW = info->inputBDims[1];
+  int BS = info->numberInputBDims;
+  int BH;
+  int BW;
+  if (BS == 1) {
+    BH = 1;
+    BW = info->inputBDims[0];
+  } else {
+    BH = info->inputBDims[BS - 2];
+    BW = info->inputBDims[BS - 1];
+  }
 
-  int OH = info->outputDims[0];
-  int OW = info->outputDims[1];
+  int totalBSize = BH * BW;
+  float *tempB = (float *)malloc(sizeof(float) * totalBSize);
+
+  int OS = info->numberOutputDims;
+  int OH;
+  int OW;
+  if (OS == 1) {
+    OH = 1;
+    OW = info->outputDims[0];
+  } else {
+    OH = info->outputDims[OS - 2];
+    OW = info->outputDims[OS - 1];
+  }
 
   if (AW != BH) {
     versat_printf("Something very wrong is happening in MatMul\n");
   }
 
-  // After transpose, matrix goes from size BH,BW to BW,BH
-  for (int y = 0; y < BH; y++) {
-    for (int x = 0; x < BW; x++) {
-      // Transposing B
-      tempB[x * BH + y] = viewB[y * BW + x];
-    }
+  Dimensions dimA = CreateDimensions(info->inputADims, info->numberInputADims);
+  Dimensions dimB = CreateDimensions(info->inputBDims, info->numberInputBDims);
+  Dimensions dimO = CreateDimensions(info->outputDims, info->numberOutputDims);
+
+  if (dimA.size == 1) {
+    Dimensions_PrependInPlace(&dimA, 1);
+  }
+  if (dimB.size == 1) {
+    Dimensions_PrependInPlace(&dimB, 1);
+  }
+  if (dimO.size == 1) {
+    Dimensions_PrependInPlace(&dimO, 1);
   }
 
-  silent_clear_cache();
+  int dimsToPreserve = 2;
+  int dimsToIterateA = MAX(0, dimA.size - dimsToPreserve);
+  int dimsToIterateB = MAX(0, dimB.size - dimsToPreserve);
+  int dimsToIterateO = MAX(0, dimO.size - dimsToPreserve);
 
-  for (int y = 0; y < OH; y++) {
-    for (int x = 0; x < OW; x++) {
-      float *lineAStart = &viewA[y * AW];
-      float *lineBStart = &tempB[x * AW];
+  AddressGen addrA = StartAddressFromDims(dimA, dimsToIterateA);
+  AddressGen addrB = StartAddressFromDims(dimB, dimsToIterateB);
+  AddressGen addrO = StartAddressFromDims(dimO, dimsToIterateO);
 
-      float *out = &viewOut[y * OW + x];
-
-      Linear_VRead(&config->leftRow, lineAStart, AW);
-      Linear_VRead(&config->rightRow, lineBStart, BH);
-      LinearStrided_VWrite(&config->output, out, 1, AW);
-
-      config->myAccum.strideMinusOne = AW - 1;
-
-      StartAccelerator();
+  while (Address_IsValid(&addrA) || Address_IsValid(&addrB) ||
+         Address_IsValid(&addrO)) {
+    if (!Address_IsValid(&addrA)) {
+      Address_Restart(&addrA);
     }
+    if (!Address_IsValid(&addrB)) {
+      Address_Restart(&addrB);
+    }
+    if (!Address_IsValid(&addrO)) {
+      Address_Restart(&addrO);
+    }
+
+    int valA = Address_GetValue(&addrA);
+    int valB = Address_GetValue(&addrB);
+    int valO = Address_GetValue(&addrO);
+
+    EndAccelerator();
+    for (int y = 0; y < BH; y++) {
+      for (int x = 0; x < BW; x++) {
+        // Transposing B
+        tempB[x * BH + y] = viewB[y * BW + x + valB];
+      }
+    }
+
+    silent_clear_cache();
+
+    for (int y = 0; y < OH; y++) {
+      for (int x = 0; x < OW; x++) {
+        float *lineAStart = &viewA[y * AW + valA];
+        float *lineBStart = &tempB[x * AW];
+
+        float *out = &viewOut[y * OW + x + valO];
+
+        Linear_VRead(&config->leftRow, lineAStart, AW);
+        Linear_VRead(&config->rightRow, lineBStart, BH);
+        LinearStrided_VWrite(&config->output, out, 1, AW);
+
+        config->myAccum.strideMinusOne = AW - 1;
+
+        StartAccelerator();
+      }
+    }
+
+    Address_Advance(&addrA);
+    Address_Advance(&addrB);
+    Address_Advance(&addrO);
   }
 
   config->leftRow.enabled = 0;
@@ -757,4 +844,78 @@ void *Versat_MatMul(void *inputA, void *inputB, void *output, int index,
 
 void *Versat_Softmax(void *inputA, void *output, int index, SoftmaxInfo *info) {
   return Software_Softmax(inputA, output, index, info);
+}
+
+void *Versat_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
+                       BatchNormalizationInfo *info){
+
+  ActivateMergedAccelerator(MergeType_Top_BatchNormalization);
+
+  float* x = (float*) inputX;
+  float* s = (float*) scale;
+  float* b = (float*) inputB;
+  float* m = (float*) mean;
+  float* v = (float*) var;
+  float* o = (float*) output;
+
+  Dimensions dim = CreateDimensions(info->inputDims,info->numberInputDims);
+
+  if(dim.size <= 1){
+    Dimensions_AppendInPlace(&dim,1);
+  }
+
+  int totalC = dim.data[1];
+
+  float* A = (float*) malloc(sizeof(float) * totalC);
+  float* B = (float*) malloc(sizeof(float) * totalC);
+  for(int c = 0; c < totalC; c++){
+    float inv = my_invsqrt(v[c] + info->epsilon);
+    A[c] = s[c] * inv;
+    B[c] = (-m[c] * inv) * s[c] + b[c];
+  }  
+
+  AddressGen addrInst = StartAddressFromDims(dim,2);
+  AddressGen* addr = &addrInst;
+
+  // TODO: We probably can also do this using the Kernel stuff.
+  //       But I kinda want a better interface when using kernel stuff.
+  Dimensions leftover = Dimensions_Cut_GetRight(dim,2);
+  int size = Dimensions_TotalSize(leftover);
+
+  while(Address_IsValid(addr)){
+    int c = Address_GetDim(addr,1);
+    
+    int index = Address_GetValue(addr);
+
+#if 0    
+    for(int i = 0; i < size; i++){
+      o[index + i] = x[index + i] * A[c] + B[c];
+    }
+#endif
+
+    union {
+      int i;
+      float f;
+    } a,b;
+
+    a.f = A[c];
+    b.f = B[c];
+
+    Top_BatchNormalization_Simple(x,o,index,size,a.i,b.i);
+    StartAccelerator();
+
+    Address_Advance(addr);
+  }
+
+  EndAccelerator();
+
+  volatile Top_BatchNormalizationConfig *config = &accelConfig->Top_BatchNormalization;
+  config->x.enabled = 0;
+  config->o.enabled = 0;
+  RunAccelerator(2);
+
+  free(A);
+  free(B);
+
+  return o;
 }

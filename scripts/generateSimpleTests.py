@@ -10,7 +10,7 @@ from onnx.helper import (
 from onnx.checker import check_model
 from skl2onnx.helpers.onnx_helper import save_onnx_model
 from onnx import numpy_helper
-from dataclasses import dataclass
+from dataclasses import dataclass,fields
 from onnxOperators import BroadCastShape, ExtendShape
 
 import sys
@@ -19,22 +19,495 @@ import onnxruntime as ort
 import os
 import shutil
 
+tests = []
+testList = []
+
 
 @dataclass
 class Test:
-    shapes: list[list[int]] = None
     tensors: list[any] = None
     outputTensor: any = None
     node: any = None
     randomArrays: list[any] = None
     initializerArrays: list[any] = None
 
+@dataclass
+class PaddingType:
+    kind: str
+    padding: list[int] = None
 
-tests: list[Test] = []
 
+@dataclass
+class ConvArgs:
+    shape: list[int]
+    features: int
+    kernel: list[int]
+    strides: list[int]
+    dilations: list[int]
+    group: int
+    bias: bool
+    auto_pad: str
+    pad: list[int]
+
+    def IsValid(self):
+        assert self.auto_pad in ["NOTSET", "SAME_LOWER", "SAME_UPPER", "VALID"]
+
+        assert len(self.shape) == 4
+
+        inputChannels = self.shape[1]
+
+        if self.features % self.group != 0:
+            return False
+        if (self.features * self.group) != inputChannels:
+            return False
+        if ((self.features * self.group) % inputChannels) != 0:
+            return False
+        return True
+
+    def Create(self):
+        global tests
+        s = self
+
+        shape = self.shape
+        features = self.features
+        kernel = self.kernel
+        strides = self.strides
+        dilations = self.dilations
+        group = self.group
+        bias = self.bias
+        auto_pad = self.auto_pad
+        pads = self.pad
+
+        assert self.IsValid()
+
+        testIndex = len(tests)
+
+        outputChannels = features
+        inputChannels = shape[1]
+        test = Test()
+
+        inputTensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
+        )
+
+        kernelShape = [features, shape[1] // group, kernel[0], kernel[1]]
+        kernelTensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 1), TensorProto.FLOAT, kernelShape
+        )
+
+        biasTensor = None
+        if bias:
+            biasTensor = make_tensor_value_info(
+                GetInputTrueName(testIndex, 2), TensorProto.FLOAT, [features]
+            )
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * len(shape)
+
+        if auto_pad == "NOTSET":
+            if pads == None:
+                pads = [0, 0, 0, 0]
+
+        if pads:
+            assert auto_pad == "NOTSET"
+
+        test.tensors = [inputTensor, kernelTensor]
+        if bias:
+            test.tensors.append(biasTensor)
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        inputs = [GetInputTrueName(testIndex, 0), GetInputTrueName(testIndex, 1)]
+        if bias:
+            inputs.append(GetInputTrueName(testIndex, 2))
+
+        test.node = make_node(
+            "Conv",
+            inputs,
+            [GetOutputTrueName(testIndex)],
+            auto_pad=auto_pad,
+            group=group,
+            dilations=dilations,
+            kernel_shape=kernel,
+            pads=pads,
+            strides=strides,
+        )
+
+        randomArray0 = np.random.randn(*shape).astype(np.float32)
+        randomArray1 = np.random.randn(*kernelShape).astype(np.float32)
+
+        linear = False
+
+        val = 1.0
+        if linear:
+            randomArray0 = np.zeros(shape).astype(np.float32)
+            for i, x in np.ndenumerate(randomArray0):
+                randomArray0[i] = val
+                val += 1.0
+
+            randomArray1 = np.zeros(kernelShape).astype(np.float32)
+            for i, x in np.ndenumerate(randomArray1):
+                randomArray1[i] = val
+                val += 1.0
+
+        test.randomArrays = [randomArray0, randomArray1]
+
+        if s.bias:
+            randomBias = np.random.randn(s.features).astype(np.float32)
+
+            if linear:
+                randomBias = np.zeros([s.features]).astype(np.float32)
+                for i, x in np.ndenumerate(randomBias):
+                    randomBias[i] = val
+                    val += 1.0
+
+            test.randomArrays.append(randomBias)
+
+        tests.append(test)
+
+
+@dataclass
+class BinaryOpArgs:
+    op: str
+    leftShape: list[int]
+    rightShape: list[int]
+    forcedOutputShape: list[int]
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        test = Test()
+
+        maxDims = max(len(self.leftShape), len(self.rightShape))
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        if self.forcedOutputShape:
+            outputShape = self.forcedOutputShape
+
+        numberInputs = 2
+        shapes = [self.leftShape,self.rightShape]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [make_tensor_value_info(
+            x, TensorProto.FLOAT, shapes[i]
+        ) for i,x in enumerate(inputs)]            
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            self.op,
+            inputs,
+            [GetOutputTrueName(testIndex)],
+        )
+
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        tests.append(test)
+
+
+@dataclass
+class UnaryOpArgs:
+    op: str
+    shape: list[int]
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        maxDims = len(self.shape)
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        test = Test()
+
+        numberInputs = 1
+        shapes = [self.shape]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [make_tensor_value_info(
+            x, TensorProto.FLOAT, shapes[i]
+        ) for i,x in enumerate(inputs)]            
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            self.op,
+            inputs,
+            [GetOutputTrueName(testIndex)],
+        )
+        
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        tests.append(test)
+
+
+@dataclass
+class MaxPoolArgs:
+    shape: list[int]
+    kernel: list[int]
+    strides: list[int]
+    auto_pad: str = "NOTSET"
+    pads: list[int] = None
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        shape = self.shape
+        auto_pad = self.auto_pad
+        pads = self.pads
+
+        test = Test()
+
+        tensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
+        )
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * len(shape)
+
+        if auto_pad == "NOTSET":
+            if pads == None:
+                pads = [0, 0, 0, 0]
+
+        if pads:
+            assert auto_pad == "NOTSET"
+
+        test.tensors = [tensor]
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "MaxPool",
+            [GetInputTrueName(testIndex, 0)],
+            [GetOutputTrueName(testIndex)],
+            kernel_shape=self.kernel,
+            strides=self.strides,
+            auto_pad=auto_pad,
+            pads=self.pads,
+        )
+
+        randomArray = np.random.randn(*shape).astype(np.float32)
+        test.randomArrays = [randomArray]
+
+        tests.append(test)
+
+
+@dataclass
+class AveragePoolArgs:
+    shape: list[int]
+    kernel: list[int]
+    strides: list[int]
+    auto_pad: str = "NOTSET"
+    pads: list[int] = None
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        shape = self.shape
+        kernel = self.kernel
+        strides = self.strides
+        auto_pad = self.auto_pad
+        pads = self.pads
+
+        test = Test()
+
+        tensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
+        )
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * len(shape)
+
+        if auto_pad == "NOTSET":
+            if pads == None:
+                pads = [0, 0, 0, 0]
+
+        if pads:
+            assert auto_pad == "NOTSET"
+
+        test.tensors = [tensor]
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "AveragePool",
+            [GetInputTrueName(testIndex, 0)],
+            [GetOutputTrueName(testIndex)],
+            kernel_shape=kernel,
+            strides=strides,
+            auto_pad=auto_pad,
+            pads=pads,
+        )
+
+        randomArray = np.random.randn(*shape).astype(np.float32)
+        test.randomArrays = [randomArray]
+
+        tests.append(test)
+
+
+@dataclass
+class ReshapeArgs:
+    shapeIn: list[int]
+    shapeOut: list[int]
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        shapeIn = self.shapeIn
+        shapeOut = self.shapeOut
+
+        test = Test()
+
+        val = np.array(shapeOut, dtype=np.int64)
+        A = numpy_helper.from_array(val, name=GetInitializerTrueName(testIndex))
+
+        tensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shapeIn
+        )
+
+        test.tensors = [tensor]
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
+        )
+        test.node = make_node(
+            "Reshape",
+            [GetInputTrueName(testIndex, 0), GetInitializerTrueName(testIndex)],
+            [GetOutputTrueName(testIndex)],
+        )
+
+        randomArray = np.random.randn(*shapeIn).astype(np.float32)
+        test.randomArrays = [randomArray]
+        test.initializerArrays = [A]
+
+        tests.append(test)
+
+
+@dataclass
+class TransposeArgs:
+    shapeIn: list[int]
+    shapeOut: list[int]
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        shapeIn = self.shapeIn
+        shapeOut = self.shapeOut
+
+        test = Test()
+
+        tensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shapeIn
+        )
+
+        test.tensors = [tensor]
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
+        )
+        test.node = make_node(
+            "Transpose",
+            [GetInputTrueName(testIndex, 0)],
+            [GetOutputTrueName(testIndex)],
+            perm=shapeOut,
+        )
+
+        randomArray = np.random.randn(*shapeIn).astype(np.float32)
+        test.randomArrays = [randomArray]
+
+        tests.append(test)
+
+
+@dataclass
+class SoftmaxArgs:
+    shape: list[int]
+    axis: int
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        shape = self.shape
+        axis = self.axis
+
+        test = Test()
+
+        tensor = make_tensor_value_info(
+            GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
+        )
+        test.tensors = [tensor]
+
+        shapeOut = [None] * len(shape)
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
+        )
+        test.node = make_node(
+            "Softmax",
+            [GetInputTrueName(testIndex, 0)],
+            [GetOutputTrueName(testIndex)],
+            axis=axis,
+        )
+
+        randomArray = np.random.randn(*shape).astype(np.float32)
+        test.randomArrays = [randomArray]
+
+        tests.append(test)
+
+@dataclass(frozen=True)
+class BatchNormalizationArgs:
+    shape: list[int]
+    epsilon: float
+    momentum: float
+
+    def Create(self):
+        global tests
+        testIndex = len(tests)
+
+        maxDims = len(self.shape)
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        C = 1
+        if len(self.shape) > 1:
+            C = self.shape[1]
+
+        test = Test()
+
+        numberInputs = 5
+        shapes = [self.shape,[C],[C],[C],[C]]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [make_tensor_value_info(
+            x, TensorProto.FLOAT, shapes[i]
+        ) for i,x in enumerate(inputs)]            
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "BatchNormalization",
+            inputs,
+            [GetOutputTrueName(testIndex)],
+            epsilon=self.epsilon,
+            momentum=self.momentum
+        )
+        
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        tests.append(test)
 
 def GetInputTrueName(testIndex, inputIndex):
-    VARS = ["X", "Y", "Z"]
+    VARS = "XYZABC"
     assert inputIndex < len(VARS)
 
     return f"{VARS[inputIndex]}{testIndex}"
@@ -48,199 +521,14 @@ def GetInitializerTrueName(testIndex):
     return f"A{testIndex}"
 
 
-def CreateBinaryOpTest(op, leftShape, rightShape):
-    global tests
-
-    maxDims = max(len(leftShape), len(rightShape))
-
-    # Let onnx infer shape specifics
-    outputShape = [None] * maxDims
-
-    testIndex = len(tests)
-
-    test = Test()
-    test.shapes = [leftShape, rightShape]
-
-    leftTensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, leftShape
-    )
-    rightTensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 1), TensorProto.FLOAT, rightShape
-    )
-
-    test.tensors = [leftTensor, rightTensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
-    )
-    test.node = make_node(
-        op,
-        [GetInputTrueName(testIndex, 0), GetInputTrueName(testIndex, 1)],
-        [GetOutputTrueName(testIndex)],
-    )
-
-    leftRandomArray = np.random.randn(*leftShape).astype(np.float32)
-    rightRandomArray = np.random.randn(*rightShape).astype(np.float32)
-    test.randomArrays = [leftRandomArray, rightRandomArray]
-
-    tests.append(test)
+def CreateBinaryOpTest(op, leftShape, rightShape, forcedOutputShape=None):
+    global testList
+    testList.append(BinaryOpArgs(op, leftShape, rightShape, forcedOutputShape))
 
 
 def CreateUnaryOpTest(op, shape):
-    global tests
-    testIndex = len(tests)
-
-    test = Test()
-    test.shapes = [shape]
-
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
-    )
-
-    test.tensors = [tensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, shape
-    )
-    test.node = make_node(
-        op, [GetInputTrueName(testIndex, 0)], [GetOutputTrueName(testIndex)]
-    )
-
-    randomArray = np.random.randn(*shape).astype(np.float32)
-    test.randomArrays = [randomArray]
-
-    tests.append(test)
-
-
-def CreateMaxPool(shape, kernel, strides, auto_pad="NOTSET", pads=None):
-    global tests
-    testIndex = len(tests)
-
-    test = Test()
-    test.shapes = [shape]
-
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
-    )
-
-    # Let onnx infer shape specifics
-    outputShape = [None] * len(shape)
-
-    if auto_pad == "NOTSET":
-        if pads == None:
-            pads = [0, 0, 0, 0]
-
-    if pads:
-        assert auto_pad == "NOTSET"
-
-    test.tensors = [tensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
-    )
-    test.node = make_node(
-        "MaxPool",
-        [GetInputTrueName(testIndex, 0)],
-        [GetOutputTrueName(testIndex)],
-        kernel_shape=kernel,
-        strides=strides,
-        auto_pad=auto_pad,
-        pads=pads,
-    )
-
-    randomArray = np.random.randn(*shape).astype(np.float32)
-    test.randomArrays = [randomArray]
-
-    tests.append(test)
-
-
-def CreateAveragePool(shape, kernel, strides, auto_pad="NOTSET", pads=None):
-    global tests
-    testIndex = len(tests)
-
-    test = Test()
-    test.shapes = [shape]
-
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
-    )
-
-    # Let onnx infer shape specifics
-    outputShape = [None] * len(shape)
-
-    if auto_pad == "NOTSET":
-        if pads == None:
-            pads = [0, 0, 0, 0]
-
-    if pads:
-        assert auto_pad == "NOTSET"
-
-    test.tensors = [tensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
-    )
-    test.node = make_node(
-        "AveragePool",
-        [GetInputTrueName(testIndex, 0)],
-        [GetOutputTrueName(testIndex)],
-        kernel_shape=kernel,
-        strides=strides,
-        auto_pad=auto_pad,
-        pads=pads,
-    )
-
-    randomArray = np.random.randn(*shape).astype(np.float32)
-    test.randomArrays = [randomArray]
-
-    tests.append(test)
-
-
-@dataclass
-class PaddingType:
-    kind: str
-    padding: list[int] = None
-
-
-@dataclass
-class ConvArgs:
-    batches: int
-    inputChannels: int
-    innerShape: list[int]
-    features: int
-    kernelShape: list[int]
-    stride: list[int]
-    dilations: list[int]
-    group: int
-    bias: bool
-    pad: PaddingType
-
-    def IsValid(self):
-        assert self.pad.kind in ["NOTSET", "SAME_LOWER", "SAME_UPPER", "VALID"]
-
-        assert len(self.innerShape) == 2
-
-        if self.features % self.group != 0:
-            return False
-        if (self.features * self.group) != self.inputChannels:
-            return False
-        if ((self.features * self.group) % self.inputChannels) != 0:
-            return False
-        return True
-
-    def CreateConvolution(self):
-        s = self
-        inputShape = [s.batches, s.inputChannels, s.innerShape[0], s.innerShape[1]]
-
-        assert self.IsValid()
-
-        CreateConvolution(
-            inputShape,
-            s.features,
-            s.kernelShape,
-            s.stride,
-            s.dilations,
-            s.group,
-            s.bias,
-            s.pad.kind,
-            s.pad.padding,
-        )
+    global testList
+    testList.append(UnaryOpArgs(op, shape))
 
 
 def CreateConvolution(
@@ -254,201 +542,42 @@ def CreateConvolution(
     auto_pad="NOTSET",
     pads=None,
 ):
-    global tests
-    testIndex = len(tests)
-
-    outputChannels = features
-    inputChannels = shape[1]
-
-    if outputChannels % group != 0:
-        # print("First", outputChannels, group)
-        return False
-    if inputChannels % group != 0:
-        # print("Second")
-        return False
-
-    # if group != 1 and (outputChannels * group) % inputChannels != 0:
-    #    #print("Third", outputChannels, group, inputChannels)
-    #    return False
-    #    # assert False
-
-    test = Test()
-    test.shapes = [shape]
-
-    inputTensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
+    global testList
+    conv = ConvArgs(
+        shape, features, kernel, strides, dilations, group, bias, auto_pad, pads
     )
 
-    kernelShape = [features, shape[1] // group, kernel[0], kernel[1]]
-    kernelTensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 1), TensorProto.FLOAT, kernelShape
-    )
+    if conv.IsValid():
+        testList.append(conv)
 
-    biasTensor = None
-    if bias:
-        biasTensor = make_tensor_value_info(
-            GetInputTrueName(testIndex, 2), TensorProto.FLOAT, [features]
-        )
 
-    # Let onnx infer shape specifics
-    outputShape = [None] * len(shape)
+def CreateMaxPool(shape, kernel, strides, auto_pad="NOTSET", pads=None):
+    global testList
+    testList.append(MaxPoolArgs(shape, kernel, strides, auto_pad, pads))
 
-    if auto_pad == "NOTSET":
-        if pads == None:
-            pads = [0, 0, 0, 0]
 
-    if pads:
-        assert auto_pad == "NOTSET"
-
-    test.tensors = [inputTensor, kernelTensor]
-    if bias:
-        test.tensors.append(biasTensor)
-
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
-    )
-    inputs = [GetInputTrueName(testIndex, 0), GetInputTrueName(testIndex, 1)]
-    if bias:
-        inputs.append(GetInputTrueName(testIndex, 2))
-
-    test.node = make_node(
-        "Conv",
-        inputs,
-        [GetOutputTrueName(testIndex)],
-        auto_pad=auto_pad,
-        group=group,
-        dilations=dilations,
-        kernel_shape=kernel,
-        pads=pads,
-        strides=strides,
-    )
-
-    print(shape, kernelShape, features)
-    randomArray0 = np.random.randn(*shape).astype(np.float32)
-    randomArray1 = np.random.randn(*kernelShape).astype(np.float32)
-
-    linear = False
-
-    val = 1.0
-    if linear:
-        randomArray0 = np.zeros(shape).astype(np.float32)
-        for i, x in np.ndenumerate(randomArray0):
-            randomArray0[i] = val
-            val += 1.0
-
-        randomArray1 = np.zeros(kernelShape).astype(np.float32)
-        for i, x in np.ndenumerate(randomArray1):
-            randomArray1[i] = val
-            val += 1.0
-
-    test.randomArrays = [randomArray0, randomArray1]
-
-    if bias:
-        randomBias = np.random.randn(features).astype(np.float32)
-
-        if linear:
-            randomBias = np.zeros([features]).astype(np.float32)
-            for i, x in np.ndenumerate(randomBias):
-                randomBias[i] = val
-                val += 1.0
-
-        test.randomArrays.append(randomBias)
-
-    # print(test.randomArrays)
-
-    tests.append(test)
+def CreateAveragePool(shape, kernel, strides, auto_pad="NOTSET", pads=None):
+    global testList
+    testList.append(AveragePoolArgs(shape, kernel, strides, auto_pad, pads))
 
 
 def CreateReshape(shapeIn, shapeOut):
-    global tests
-    testIndex = len(tests)
-
-    test = Test()
-
-    val = np.array(shapeOut, dtype=np.int64)
-    A = numpy_helper.from_array(val, name=GetInitializerTrueName(testIndex))
-
-    test.shapes = [shapeIn]
-
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shapeIn
-    )
-
-    test.tensors = [tensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
-    )
-    test.node = make_node(
-        "Reshape",
-        [GetInputTrueName(testIndex, 0), GetInitializerTrueName(testIndex)],
-        [GetOutputTrueName(testIndex)],
-    )
-
-    randomArray = np.random.randn(*shapeIn).astype(np.float32)
-    test.randomArrays = [randomArray]
-    test.initializerArrays = [A]
-
-    tests.append(test)
+    global testList
+    testList.append(ReshapeArgs(shapeIn, shapeOut))
 
 
-def CreateTranspose(shapeIn, perm):
-    global tests
-    testIndex = len(tests)
-
-    test = Test()
-
-    shapeOut = [None] * len(shapeIn)
-    test.shapes = [shapeIn]
-
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shapeIn
-    )
-
-    test.tensors = [tensor]
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
-    )
-    test.node = make_node(
-        "Transpose",
-        [GetInputTrueName(testIndex, 0)],
-        [GetOutputTrueName(testIndex)],
-        perm=perm,
-    )
-
-    randomArray = np.random.randn(*shapeIn).astype(np.float32)
-    test.randomArrays = [randomArray]
-
-    tests.append(test)
+def CreateTranspose(shapeIn, shapeOut):
+    global testList
+    testList.append(TransposeArgs(shapeIn, shapeOut))
 
 
 def CreateSoftmax(shape, axis=-1):
-    global tests
-    testIndex = len(tests)
+    global testList
+    testList.append(SoftmaxArgs(shape, axis))
 
-    test = Test()
-
-    test.shapes = [shape]
-    tensor = make_tensor_value_info(
-        GetInputTrueName(testIndex, 0), TensorProto.FLOAT, shape
-    )
-    test.tensors = [tensor]
-
-    shapeOut = [None] * len(shape)
-    test.outputTensor = make_tensor_value_info(
-        GetOutputTrueName(testIndex), TensorProto.FLOAT, shapeOut
-    )
-    test.node = make_node(
-        "Softmax",
-        [GetInputTrueName(testIndex, 0)],
-        [GetOutputTrueName(testIndex)],
-        axis=axis,
-    )
-
-    randomArray = np.random.randn(*shape).astype(np.float32)
-    test.randomArrays = [randomArray]
-
-    tests.append(test)
-
+def CreateBatchNormalization(shape, epsilon=None,momentum=None):
+    global testList
+    testList.append(BatchNormalizationArgs(shape,epsilon,momentum))
 
 def CreateBinaryOpDynamicTest(leftShape, rightShape, actualLeft, actualRight):
     global tests
@@ -461,7 +590,6 @@ def CreateBinaryOpDynamicTest(leftShape, rightShape, actualLeft, actualRight):
     testIndex = len(tests)
 
     test = Test()
-    test.shapes = [actualLeft, actualRight]
 
     leftTensor = make_tensor_value_info(
         GetInputTrueName(testIndex, 0), TensorProto.FLOAT, leftShape
@@ -487,24 +615,42 @@ def CreateBinaryOpDynamicTest(leftShape, rightShape, actualLeft, actualRight):
     tests.append(test)
 
 
-def GenerateSimpleTest(outputPath):
+def GenerateSimpleTest():
     testComplexity = 0
+
+    # MARK
 
     testAdd = False
     testRelu = False
     testReshape = False
     testSoftmax = False
     testTranspose = False
-    testMatMul = False
-    testMaxPool = False
-    testAveragePool = False
-
+    testMaxPool = True
+    testAveragePool = True
+    testMatMul = True
     testConv = False
+    testBatchNormalization = False
 
     testBig = False
     generativeTests = False
 
-    if True:
+    if False:
+        n = 1  # Batches
+        c = 1  # Input channels
+        f = 1  # Output channels
+        hw = [4, 4]  # Image height and width
+        k = [2, 2]  # 2D Kernel
+        s = [2, 2]  # 2D Stride
+        d = [1, 1]  # 2D Dilations
+        g = 1  # Groups
+        b = False  # Use bias
+        p = "NOTSET"  # Padding Kind
+        pd = [0, 0, 0, 0]  # Actual padding used when NOTSET
+
+        # 0
+        CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
+
+    if False:
         n = 1  # Batches
         c = 1  # Input channels
         f = 1  # Output channels
@@ -551,6 +697,29 @@ def GenerateSimpleTest(outputPath):
         # CreateConvolution([n, 4, hw[0], hw[1]], 12, k, s, d, 4, b, p, pd)
         # CreateConvolution([n, 12, hw[0], hw[1]], 12, k, s, d, 4, b, p, pd)
         # CreateConvolution([n, 12, hw[0], hw[1]], 8, k, s, d, 4, b, p, pd)
+
+    if testBatchNormalization:
+        for t in [2,10]:
+            CreateBatchNormalization([1,1,1,1])
+            CreateBatchNormalization([1,1,1,t])
+            CreateBatchNormalization([1,1,t,1])
+            CreateBatchNormalization([1,t,1,1])
+            CreateBatchNormalization([t,1,1,1])
+            CreateBatchNormalization([1,1,t,t])
+            CreateBatchNormalization([1,t,1,t])
+            CreateBatchNormalization([t,1,1,t])
+            CreateBatchNormalization([1,t,t,1])
+            CreateBatchNormalization([2,1,t,1])
+            CreateBatchNormalization([t,t,1,1])
+            CreateBatchNormalization([t,t,1,1])
+            CreateBatchNormalization([1,t,t,t])
+            CreateBatchNormalization([t,1,t,t])
+            CreateBatchNormalization([t,t,1,t])
+            CreateBatchNormalization([t,t,t,1])
+            CreateBatchNormalization([t,t,t,t])
+
+        # Big examples to trigger memory exhaustion problems.
+        CreateBatchNormalization([2,2,100,100])
 
     if testSoftmax:
         # Softmax axis come in pairs.
@@ -656,6 +825,32 @@ def GenerateSimpleTest(outputPath):
         CreateTranspose([2, 3, 4], [2, 1, 0])
 
     if testMatMul:
+        # Matrices of sizes different than 2 are supported by ONNX by broadcasting the inner 2 dimensions
+        CreateBinaryOpTest("MatMul", [2, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 2, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 1, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 2, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 2, 2, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1], [1], [1])
+        CreateBinaryOpTest("MatMul", [1], [1, 1], [1])
+        CreateBinaryOpTest("MatMul", [1, 2, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1, 1, 1, 1], [1, 1])
+        CreateBinaryOpTest("MatMul", [1, 1, 1, 2, 1], [1, 1])
+        CreateBinaryOpTest("MatMul", [1, 1, 2, 1, 1], [1, 1])
+        CreateBinaryOpTest("MatMul", [1, 2, 1, 1, 1], [1, 1])
+        CreateBinaryOpTest("MatMul", [2, 1, 1, 1, 1], [1, 1])
+        CreateBinaryOpTest("MatMul", [1, 1, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1, 1, 2, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1, 2, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 2, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [2, 1, 1, 1, 3], [3, 4])
+        CreateBinaryOpTest("MatMul", [1, 1], [1, 1, 1, 1, 1])
+        CreateBinaryOpTest("MatMul", [1, 2], [1, 1, 1, 2, 1])
+        CreateBinaryOpTest("MatMul", [4, 2], [1, 1, 1, 2, 1])
+
+        # The more common matrices operations are just
         CreateBinaryOpTest("MatMul", [1, 1], [1, 1])
         CreateBinaryOpTest("MatMul", [1, 2], [2, 1])
         CreateBinaryOpTest("MatMul", [2, 1], [1, 2])
@@ -665,6 +860,9 @@ def GenerateSimpleTest(outputPath):
         CreateBinaryOpTest("MatMul", [2, 4], [4, 8])
         CreateBinaryOpTest("MatMul", [8, 4], [4, 2])
         CreateBinaryOpTest("MatMul", [10, 11], [11, 20])
+        CreateBinaryOpTest("MatMul", [20, 30], [30, 40])
+        CreateBinaryOpTest("MatMul", [40, 30], [30, 20])
+        CreateBinaryOpTest("MatMul", [50, 50], [50, 50])
 
         if testBig:
             CreateBinaryOpTest("MatMul", [100, 200], [200, 300])
@@ -854,22 +1052,17 @@ def GenerateSimpleTest(outputPath):
                                         for b in bP:
                                             for p in pP:
                                                 for g in gP:
-                                                    conv = ConvArgs(
-                                                        n,
-                                                        c,
-                                                        a,
+                                                    CreateConvolution(
+                                                        [n, c, *a],
                                                         f,
                                                         k,
                                                         s,
                                                         d,
                                                         g,
                                                         b,
-                                                        p,
+                                                        p.kind,
+                                                        p.padding,
                                                     )
-
-                                                    if not conv.IsValid():
-                                                        continue
-                                                    args.append(conv)
 
             # This set of examples is causing problems because somehow the SAME_LOWER padding is causing the
             # t = 7
@@ -884,19 +1077,6 @@ def GenerateSimpleTest(outputPath):
             # t = 5
             # ConvArgs(batches=1, inputChannels=1, innerShape=[t, t], features=1, kernelShape=[1, 1], stride=[t, t], dilations=[1, 1], group=1, bias=False, pad=PaddingType(kind='NOTSET', padding=[0,0,0,0])).CreateConvolution()
             # ConvArgs(batches=1, inputChannels=1, innerShape=[t, t], features=1, kernelShape=[1, 1], stride=[t, t], dilations=[1, 1], group=1, bias=False, pad=PaddingType(kind='SAME_LOWER', padding=None)).CreateConvolution()
-
-            if False:
-                ind = 72
-
-                lastGood = args[ind - 1]
-                fail = args[ind]
-
-                print("Good:", lastGood)
-                print("Bad:", fail)
-                fail.CreateConvolution()
-            else:
-                for convArgs in args:
-                    convArgs.CreateConvolution()
 
         if testComplexity == 0 or False:
             CreateConvolution([1, 2, 2, 2], 2, [2, 2], [2, 2], [1, 1], 2)
@@ -1033,6 +1213,45 @@ def GenerateSimpleTest(outputPath):
         # if testComplexity == 2 or testBig or False:
         #    CreateConvolution([1, 1, 100, 100], 1, [100, 100], [100, 100], d, g, True)
 
+def MakeHashable(val):
+    if(type(val) == list):
+        val = tuple(MakeHashable(x) for x in val)
+    return val
+
+def GenerateTest(outputPath):
+    global testList
+    global tests
+
+    GenerateSimpleTest()
+
+    if False:
+        testToFocus = 1
+        testList = [testList[testToFocus]]
+        print(testList[0])
+
+    # TODO: Make the seed be an hash of the test, thus ensuring it is reproducible if we end up changing things in the future.
+    for test in testList:
+        hashable = {}
+        for field in fields(test):
+            val = getattr(test, field.name)
+            val = MakeHashable(val)
+            hashable[field.name] = val
+
+        h = hash(frozenset(hashable.items())) % 2**31
+        np.random.seed(h)
+        test.Create()
+
+    """
+    for test in tests:
+        val = 1.0
+        sign = 1.0
+        for array in test.randomArrays:
+            for i, x in np.ndenumerate(array):
+                array[i] = val
+                val += 1.0 * sign
+                sign = -sign
+    """
+
     allInputNodesAndValuesInOrder = []
     for x in tests:
         for tensor, randomArray in zip(x.tensors, x.randomArrays):
@@ -1100,4 +1319,4 @@ def GenerateSimpleTest(outputPath):
 
 
 if __name__ == "__main__":
-    GenerateSimpleTest(sys.argv[1])
+    GenerateTest(sys.argv[1])

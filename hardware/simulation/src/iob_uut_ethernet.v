@@ -7,7 +7,7 @@
 `timescale 1ns / 1ps
 `include "iob_uut_conf.vh"
 
-module iob_uut #(
+module iob_uut_ethernet #(
     parameter AXI_ID_W = `IOB_UUT_AXI_ID_W,  // Don't change this parameter value!
     parameter AXI_LEN_W = `IOB_UUT_AXI_LEN_W,  // Don't change this parameter value!
     parameter AXI_ADDR_W = `IOB_UUT_AXI_ADDR_W,  // Don't change this parameter value!

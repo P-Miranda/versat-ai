@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 sys.path.append("./scripts")
 
-from generateSimpleTests import GenerateSimpleTest
+from generateSimpleTests import GenerateTest
 from onnxMain import GenerateDebug
 
 # TODO: FIXED_LIST instead of encoding the models, it could encode the name of the tests themselves.
@@ -167,7 +167,7 @@ if __name__ == "__main__":
         f.write("\n};\n")
 
     if test.type == TestType.GENERATED:
-        GenerateSimpleTest("./tests/generated/")
+        GenerateTest("./tests/generated/")
         GenerateDebug(
             "tests/generated/",
             "model.onnx",

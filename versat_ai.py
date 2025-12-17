@@ -11,12 +11,14 @@ def setup(py_params: dict):
     addr_w = 32
     data_w = 32
 
+    # ETHERNET: On hardware/simulation/src/ changed iob_uut to iob_uut_ethernet
+
     # Set new default values for python parameters of iob_system (parent module)
     # List of iob_system python parameters available at: https://github.com/IObundle/py2hwsw/blob/main/py2hwsw/lib/iob_system/iob_system.py
     iob_system_default_overrides = {
         "use_intmem": False,
         "use_extmem": True,
-        "use_ethernet": True,
+        "use_ethernet": False,  # ETHERNET: Changed from true to false
         "mem_addr_w": mem_addr_w,
         "include_tester": False,
         "cpu": "iob_vexriscv",
@@ -41,13 +43,13 @@ def setup(py_params: dict):
             "s0_axi_s": "cpu_ibus",
             "s1_axi_s": "cpu_dbus",
             "s2_axi_s": "versat_axi",
-            "s3_axi_s": "eth_axi",
+            # "s3_axi_s": "eth_axi", #ETHERNET: Commented this line
             # Manager interfaces connected below
         },
         "addr_w": addr_w,
         "data_w": data_w,
         "lock_w": 1,
-        "num_subordinates": 4,
+        "num_subordinates": 3,  # ETHERNET: CHANGED FROM 4 to 3
     }
     xbar_manager_interfaces = {
         "use_extmem": (

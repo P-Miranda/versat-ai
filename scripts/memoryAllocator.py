@@ -197,8 +197,6 @@ def CalculateMemoryAllocations(cModel):
         memoryAllocations
     )
 
-    print(totalTempMemoryNeeded, offsets)
-
     # Embedded does not support unaligned memory. Need to be very carefully with all the allocations that are just passed directly to the embedded this way
     for x in offsets:
         assert x % 4 == 0

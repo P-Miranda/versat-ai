@@ -40,6 +40,8 @@ end
 wire store = (delay == 0);
 
 reg [DATA_W-1:0] stored;
+reg bothNegative,bothPositive;
+reg isInputBigger;
 
 wire inputNegative = in0[DATA_W-1];
 wire storedNegative = stored[DATA_W-1];
@@ -52,15 +54,18 @@ reg [DATA_W-1:0] bigger;
 
 always @* begin
    bigger = stored;
+   bothPositive = !storedNegative && !inputNegative;
+   bothNegative = storedNegative && inputNegative;
+   isInputBigger = (in0[DATA_W-2:0] > stored[DATA_W-2:0]);
 
-   if(storedNegative && !inputNegative) begin
+   if(bothPositive && isInputBigger) begin
       bigger = in0;
    end
-
-   if(storedNegative == inputNegative) begin
-      if(in0[DATA_W-2:0] > stored[DATA_W-2:0]) begin
-         bigger = in0;
-      end
+   if(bothNegative && !isInputBigger) begin
+      bigger = in0;
+   end
+   if(storedNegative && !inputNegative) begin
+      bigger = in0;
    end
 end
 

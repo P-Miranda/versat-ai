@@ -25,7 +25,14 @@ typedef struct {
 } Dimensions;
 
 Dimensions CreateDimensions(int64_t *dims, int numberDims);
-int Dimensions_Size(Dimensions dim);
+void Dimensions_PrependInPlace(
+    Dimensions *dim, int value); // A bit slow, do not abuse if possible
+void Dimensions_AppendInPlace(Dimensions *dim, int value);
+
+Dimensions Dimensions_Cut_GetLeft(Dimensions dim,int amount);
+Dimensions Dimensions_Cut_GetRight(Dimensions dim,int amount);
+
+int Dimensions_TotalSize(Dimensions dim);
 
 // ======================================
 // AddressGen
@@ -39,16 +46,23 @@ typedef struct {
   int numberDims;
 } AddressGen;
 
+AddressGen StartAddress(int64_t *iterationDims, int64_t *properDims,
+                        int numberDims);
+
+// If dims is A x B x C and iterDims = 1 then A is iterated and B x C are not
+// iterated. If iterDims = 2 then A x B are iterated and C is not and so on.
+// iterDims = 0 means no iteration.
+AddressGen StartAddressFromDims(Dimensions dims, int iterDims);
+
+int Address_GetDim(AddressGen *gen,int index);
 void Address_Print(AddressGen *gen);
 int Address_GetValue(AddressGen *gen);
 bool Address_IsValid(AddressGen *gen);
 void Address_Advance(AddressGen *gen);
 void Address_AdvanceAxis(AddressGen *gen, int axisToAdvance);
-AddressGen StartAddress(int64_t *iterationDims, int64_t *properDims,
-                        int numberDims);
+void Address_Restart(AddressGen *gen);
 
 AddressGen Address_Map(AddressGen *in, int64_t *biggerDim, int *stride);
-
 // TODO: Need to standardize this stuff eventually.
 AddressGen Address_Map2(AddressGen *in, int64_t *biggerDim, int *stride,
                         int *offset);
@@ -105,7 +119,7 @@ void Kernel_Advance(KernelGen *gen);
 // ======================================
 // Arena (Temporary)
 // TODO: All arena stuff eventually must be removed. Do not want to allocate
-// stuff mid inference.
+// stuff mid inference if possible.
 
 struct Arena_t;
 typedef struct Arena_t Arena;
@@ -233,6 +247,13 @@ typedef struct {
   int permSize;
 } TransposeInfo;
 
+typedef struct {
+  int64_t *inputDims;
+  int numberInputDims;
+  float epsilon;
+  float momentum;
+} BatchNormalizationInfo;
+
 // Software implementations
 void *Software_Conv(void *inputX, void *inputW, void *output, int index,
                     ConvInfo *info);
@@ -253,6 +274,8 @@ void *Software_MatMul(void *inputA, void *inputB, void *output, int index,
                       MatMulInfo *info);
 void *Software_Softmax(void *inputA, void *output, int index,
                        SoftmaxInfo *info);
+void *Software_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
+                       BatchNormalizationInfo *info);
 
 // Accelerator implementations
 void *Versat_Add(void *inputA, void *inputB, void *output, int index,
@@ -272,6 +295,8 @@ void *Versat_ConvWithBias(void *inputX, void *inputW, void *inputB,
 void *Versat_MatMul(void *inputA, void *inputB, void *output, int index,
                     MatMulInfo *info);
 void *Versat_Softmax(void *inputA, void *output, int index, SoftmaxInfo *info);
+void *Versat_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
+                       BatchNormalizationInfo *info);
 
 // ======================================
 // Misc
@@ -280,6 +305,8 @@ int64_t CalculateSizeOfDim(int64_t *dim, int dims);
 
 void AssertAlmostEqual(void *toTest, void *correctValues, int index,
                        LayerInfo *info);
+
+float my_invsqrt(float number);
 
 // ======================================
 // Extra Info

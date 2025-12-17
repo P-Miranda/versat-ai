@@ -61,6 +61,7 @@ class MemoryLocation:
 
 class OnnxAttributeType(Enum):
     INTEGER = auto()
+    FLOAT = auto()
     BOUNDED_INTEGER = auto()
     INTEGER_LIST = auto()
     AXIS_LIST = auto()
