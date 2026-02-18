@@ -9,21 +9,21 @@
 //       All of them return the previously set function and by default they are
 //       initialized with dummy functions that do not perform any action
 
+// TODO: Maybe change the name since they are not actually used by Versat.
+
 // Call this function with a valid function that is fast and returns some form
 // of time measurement (application specific, Versat does not care about this
 // result)
 typedef uint64_t (*MeasureTimeFunction)();
 MeasureTimeFunction Versat_SetTimeMeasurementFunction(MeasureTimeFunction func);
 
-// Versat will not print any debug messages unless this is set beforehand.
-typedef int (*PrintFunction)(const char *name, ...);
-PrintFunction Versat_SetPrintFunction(PrintFunction func);
-
 // Clear cache starting from ptr and spaning size bytes
 // Depending on the architecture of the embedded system this might not be
 // required or it might be essential.
 typedef void (*ClearCache)(void *ptr, size_t size);
 ClearCache Versat_SetClearCache(ClearCache func);
+
+typedef int (*VersatPrintf)(const char *format, ...);
 
 // TODO: Still need to figure out how to make this work, we could just allocate
 // some output memory and store the array inside it.

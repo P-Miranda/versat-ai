@@ -13,8 +13,10 @@
 #include "versat_ai_mmap.h"
 #include <string.h>
 
-// ETHERNET disabled for now
+// ETHERNET enabled for now to test Alexnet
 //#define USE_ETHERNET
+
+//#define DEBUG
 
 #ifdef PC
 #undef USE_ETHERNET
@@ -81,6 +83,11 @@ void ethernet_receive_file(const char *path, void *buffer, int expectedSize) {
     return;
   }
   uint32_t size = uart_request_ethernet_recvfile(path);
+#if 0
+  printf(
+      "Gonna call eth to receive file of size: %u and expected size of: %u\n",
+      size, expectedSize);
+#endif
   eth_rcv_file(buffer, size);
 }
 #endif
@@ -203,7 +210,6 @@ int main() {
   ConfigCreateVCD(false);
 
   Versat_SetTimeMeasurementFunction(timer_get_count);
-  Versat_SetPrintFunction(printf);
   Versat_SetClearCache(silent_clear_cache_args);
 
   printf("Versat base: %x\n", VERSAT0_BASE);

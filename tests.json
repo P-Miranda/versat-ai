@@ -18,6 +18,14 @@
     "type": "FIXED",
     "path": "./tests/visual_wake"
   },
+  "MNIST": {
+    "type": "FIXED",
+    "path": "./tests/mnist"
+  },
+  "Alexnet": {
+    "type": "FIXED",
+    "path": "./tests/alexnet"
+  },
   "All": {
     "type": "FIXED_LIST",
     "subTests": ["ToyCar","Image","Keyword","VisualWake"]

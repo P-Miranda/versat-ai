@@ -11,8 +11,8 @@
 // ======================================
 // Global stuff (versat side)
 
+extern VersatPrintf versat_printf;
 extern MeasureTimeFunction versat_time;
-extern PrintFunction versat_printf;
 extern ClearCache versat_clearCache;
 
 // ======================================
@@ -29,8 +29,8 @@ void Dimensions_PrependInPlace(
     Dimensions *dim, int value); // A bit slow, do not abuse if possible
 void Dimensions_AppendInPlace(Dimensions *dim, int value);
 
-Dimensions Dimensions_Cut_GetLeft(Dimensions dim,int amount);
-Dimensions Dimensions_Cut_GetRight(Dimensions dim,int amount);
+Dimensions Dimensions_Cut_GetLeft(Dimensions dim, int amount);
+Dimensions Dimensions_Cut_GetRight(Dimensions dim, int amount);
 
 int Dimensions_TotalSize(Dimensions dim);
 
@@ -54,7 +54,7 @@ AddressGen StartAddress(int64_t *iterationDims, int64_t *properDims,
 // iterDims = 0 means no iteration.
 AddressGen StartAddressFromDims(Dimensions dims, int iterDims);
 
-int Address_GetDim(AddressGen *gen,int index);
+int Address_GetDim(AddressGen *gen, int index);
 void Address_Print(AddressGen *gen);
 int Address_GetValue(AddressGen *gen);
 bool Address_IsValid(AddressGen *gen);
@@ -92,8 +92,6 @@ AddressGen Address_Map2(AddressGen *in, int64_t *biggerDim, int *stride,
 typedef struct {
   int kernelVars[MAX_DIMS]; // Current state
 
-  // Kernel Info
-  // AddressGen *address;
   int addressGenVars[MAX_DIMS]; // The value of the address vars at the start of
                                 // the kernel iteration.
   int addressIterDims[MAX_DIMS];   // The original iteration dimensions. Kernel
@@ -109,6 +107,9 @@ typedef struct {
 } KernelGen;
 
 KernelGen StartKernel(AddressGen *address, int *kernelDims, int kernelSize);
+KernelGen StartKernel_IterateOneDimOnly(AddressGen *address, int dimToIterate,
+                                        int start, int end);
+
 void Kernel_PrintShort(KernelGen *gen);
 void Kernel_Print(KernelGen *gen);
 int Kernel_GetValue(KernelGen *gen);
@@ -254,6 +255,32 @@ typedef struct {
   float momentum;
 } BatchNormalizationInfo;
 
+typedef struct {
+  int64_t *inputDims;
+  int numberInputDims;
+  float ratio;
+} DropoutInfo;
+
+typedef struct {
+  int64_t *inputDims;
+  int numberInputDims;
+  float alpha;
+  float beta;
+  float bias;
+  int size;
+} LRNInfo;
+
+typedef struct {
+  int64_t *aDims;
+  int64_t *bDims;
+  int64_t *cDims;
+  int numberDims;
+  float alpha;
+  float beta;
+  int transA;
+  int transB;
+} GemmInfo;
+
 // Software implementations
 void *Software_Conv(void *inputX, void *inputW, void *output, int index,
                     ConvInfo *info);
@@ -274,8 +301,13 @@ void *Software_MatMul(void *inputA, void *inputB, void *output, int index,
                       MatMulInfo *info);
 void *Software_Softmax(void *inputA, void *output, int index,
                        SoftmaxInfo *info);
-void *Software_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
-                       BatchNormalizationInfo *info);
+void *Software_BatchNormalization(void *inputX, void *scale, void *inputB,
+                                  void *mean, void *var, void *output,
+                                  int index, BatchNormalizationInfo *info);
+void *Software_Dropout(void *input, void *out, int index, DropoutInfo *info);
+void *Software_LRN(void *input, void *out, int index, LRNInfo *info);
+void *Software_Gemm(void *inA, void *inB, void *inC, void *out, int index,
+                    GemmInfo *info);
 
 // Accelerator implementations
 void *Versat_Add(void *inputA, void *inputB, void *output, int index,
@@ -295,8 +327,13 @@ void *Versat_ConvWithBias(void *inputX, void *inputW, void *inputB,
 void *Versat_MatMul(void *inputA, void *inputB, void *output, int index,
                     MatMulInfo *info);
 void *Versat_Softmax(void *inputA, void *output, int index, SoftmaxInfo *info);
-void *Versat_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
-                       BatchNormalizationInfo *info);
+void *Versat_BatchNormalization(void *inputX, void *scale, void *inputB,
+                                void *mean, void *var, void *output, int index,
+                                BatchNormalizationInfo *info);
+void *Versat_Dropout(void *input, void *out, int index, DropoutInfo *info);
+void *Versat_LRN(void *input, void *out, int index, LRNInfo *info);
+void *Versat_Gemm(void *inA, void *inB, void *inC, void *out, int index,
+                  GemmInfo *info);
 
 // ======================================
 // Misc
@@ -349,6 +386,9 @@ typedef struct {
   int currentOutputC;
   int currentOutputX;
   int currentOutputY;
+
+  int advanceC;
+
   bool iterateC;
   bool isNCHW; // Otherwise assume it is NHWC
 } WindowGen;
@@ -367,9 +407,13 @@ typedef struct {
   int outputY;
 
   int startC;
-  int inputSizeC; // This is mostly the same as inputImageC since Conv cannot
-                  // handle half sums. We must always process the entire input
-                  // channels, we cannot handle half sums.
+  // TODO: The comment below is technically true but we might want to represent
+  // inputSizeC because of groups.
+  //       We might be able to push the logic of conv groups
+  // NOTE: Versat cannot handle processing less than full input channels per
+  // run.
+  //       Otherwise we would need to store the "half sum" somewhere and
+  //       add everything together at the end
 
   int outputC;
   int outputSizeC;
@@ -384,9 +428,13 @@ typedef struct {
   int outputH;
 
   PaddingRegion padding;
+  bool entireWindowInsidePadding;
 } AdvancedWindow;
 
 WindowGen StartWindowGen(ExtraInfo *info, bool iterateC, bool isNCHW);
+WindowGen StartAdvancedWindowGen(ExtraInfo *info, bool iterateC, bool isNCHW,
+                                 int cMaxAdvance);
+
 AdvancedWindow WindowGen_Get(WindowGen *gen);
 void WindowGen_Advance(WindowGen *gen);
 bool WindowGen_Valid(WindowGen *gen);

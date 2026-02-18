@@ -125,6 +125,9 @@ void *Software_Conv(void *inputX, void *inputW, void *output, int index,
 
 void *Software_Reshape(void *data, void *shape, void *output, int index,
                        ReshapeInfo *info) {
+  // TODO: Need to copy the input, cannot assume that memory will remain valid.
+  // NOTE: If we want to avoid the copy need to put logic on onnx script that
+  // removes the operator call.
   return data;
 }
 
@@ -376,9 +379,9 @@ void *Software_MatMul(void *inputA, void *inputB, void *output, int index,
   return output;
 }
 
-float ABS(float x) { return x < 0 ? -x : x; }
+double ABS(double x) { return x < 0 ? -x : x; }
 
-float my_exp(float x) {
+double my_exp(double x) {
   double result = 1.0;
   double term = 1.0;
   double div = 1.0;
@@ -399,8 +402,154 @@ float my_exp(float x) {
     lastResult = result;
   }
 
-  return (float)result;
+  return result;
 }
+
+#define MAX_ITERS 20
+double thetah_table[MAX_ITERS] = {
+    0.549306, 0.255413, 0.125657, 0.062582, 0.031260, 0.015626, 0.007813,
+    0.003906, 0.001953, 0.000977, 0.000488, 0.000244, 0.000122, 0.000061,
+    0.000031, 0.000015, 0.000008, 0.000004, 0.000002, 0.000001};
+
+double Cordic_arctanh(double y, double x) {
+  double angle = 0.0;
+  double P2i = 0.5;
+  int k = 4;
+
+  for (int i = 1; i < MAX_ITERS; i++) {
+    double arc_tangent = thetah_table[i - 1];
+
+    int iters = 1;
+    if (i == k) {
+      iters = 2;
+      k = (3 * k) + 1;
+    }
+
+    for (int k = 0; k < iters; k++) {
+      double sigma = 1.0;
+      if (y < 0) {
+        sigma = -1.0;
+      }
+
+      angle = angle + sigma * arc_tangent;
+      double calcX = x - sigma * y * P2i;
+      double calcY = y - sigma * x * P2i;
+
+      x = calcX;
+      y = calcY;
+    }
+
+    P2i /= 2.0;
+  }
+
+  return angle;
+}
+
+#define MATH_E 2.71828182846
+#define MATH_PI 3.14159265359
+
+double Cordic_log(double in) {
+  double val = in;
+
+  double extra = 0;
+  while (val > MATH_E) {
+    val /= MATH_E;
+    extra += 1;
+  }
+
+  double res = (2.0 * Cordic_arctanh(val - 1, val + 1)) + extra;
+  return res;
+}
+
+double Cordic_exp(double exponent) {
+  int k = 4;
+  double angle = exponent;
+  double y = 1.207497067763;
+  double x = 1.207497067763;
+  double P2i = 0.5;
+
+  int extra = 0;
+  while (angle > 1.0) {
+    angle -= 1.0;
+    extra += 1;
+  }
+
+  while (angle < 0) {
+    angle += 1.0;
+    extra -= 1;
+  }
+
+  for (int i = 1; i < MAX_ITERS; i++) {
+    double arc_tangent = thetah_table[i - 1];
+
+    int iters = 1;
+    if (i == k) {
+      iters = 2;
+      k = (3 * k) + 1;
+    }
+
+    for (int k = 0; k < iters; k++) {
+      double sigma = 1.0;
+      if (angle > 0.0) {
+        sigma = -1.0;
+      }
+
+      angle = angle + sigma * arc_tangent;
+      double calcX = x - sigma * y * P2i;
+      double calcY = y - sigma * x * P2i;
+
+      x = calcX;
+      y = calcY;
+    }
+
+    P2i /= 2.0;
+  }
+
+  for (int i = 0; i < extra; i++) {
+    x *= MATH_E;
+  }
+  for (int i = 0; i > extra; i--) {
+    x /= MATH_E;
+  }
+
+  return x;
+}
+
+double my_log(double x) {
+  double start = 0.0;
+
+  for (int i = 0; i < 1000; i++) {
+    double last = start;
+    start = start + 2.0 * ((x - my_exp(start)) / (x + my_exp(start)));
+    if (last == start) {
+      break;
+    }
+  }
+
+  return start;
+}
+
+double my_pow(double b, double e) {
+  double result = my_exp(e * my_log(b));
+  return result;
+}
+
+double Cordic_pow(double b, double e) {
+  double result = Cordic_exp(e * Cordic_log(b));
+  return result;
+}
+
+#define USE_CORDIC
+
+#ifdef USE_CORDIC
+#define SOFT_POW(B, E) Cordic_pow(B, E)
+#define SOFT_LOG(X) Cordic_log(X)
+#define SOFT_EXP(X) Cordic_exp(X)
+#else
+#define SOFT_POW(B, E) my_pow(B, E)
+#define SOFT_LOG(X) my_log(X)
+#define SOFT_EXP(X) my_exp(X)
+#endif
 
 void *Software_Softmax(void *input, void *output, int index,
                        SoftmaxInfo *info) {
@@ -429,7 +578,8 @@ void *Software_Softmax(void *input, void *output, int index,
 
   // TODO: We probably can simplify the logic in here by using Dimensions.
 
-  AddressGen testInst = StartAddress(info->inputDims, info->inputDims, info->numberInputDims);
+  AddressGen testInst =
+      StartAddress(info->inputDims, info->inputDims, info->numberInputDims);
   AddressGen *test = &testInst;
 
   int kernelSize = info->numberInputDims - axis;
@@ -447,59 +597,131 @@ void *Software_Softmax(void *input, void *output, int index,
     for (; Kernel_IsValid(gen); Kernel_Advance(gen)) {
       int index = Kernel_GetValue(gen);
 
-      sum += my_exp(view[index]);
+      sum += SOFT_EXP(view[index]);
     }
 
     genInst = StartKernel(test, kernelDims, kernelSize);
     for (; Kernel_IsValid(gen); Kernel_Advance(gen)) {
       int index = Kernel_GetValue(gen);
 
-      out[index] = my_exp(view[index]) / sum;
+      out[index] = SOFT_EXP(view[index]) / sum;
     }
   }
 
   return output;
 }
 
-// TODO: While this is the approach that directly matches what ONNX requires, it is also slower for the average case. (Where the statistic values are usually initializers and not inputs.)
-//       A lot of the logic can be simplified by precomputing values (ex: the invsqrt routine is not needed since it only cares about values that we already know about)
-//       This of course can only be perform if the values are initializers and not inputs. (Which I assume is the default case for a great deal of these.)
-//       That means there is a possibility of using a much faster routine by pushing logic to the onnx converter and have it collapse all the initializers into a simpler operation.
-void *Software_BatchNormalization(void *inputX, void *scale, void *inputB,void *mean,void *var, void *output, int index,
-                       BatchNormalizationInfo *info){
+// TODO: While this is the approach that directly matches what ONNX requires, it
+// is also slower for the average case. (Where the statistic values are usually
+// initializers and not inputs.)
+//       A lot of the logic can be simplified by precomputing values (ex: the
+//       invsqrt routine is not needed since it only cares about values that we
+//       already know about) This of course can only be perform if the values
+//       are initializers and not inputs. (Which I assume is the default case
+//       for a great deal of these.) That means there is a possibility of using
+//       a much faster routine by pushing logic to the onnx converter and have
+//       it collapse all the initializers into a simpler operation.
+void *Software_BatchNormalization(void *inputX, void *scale, void *inputB,
+                                  void *mean, void *var, void *output,
+                                  int index, BatchNormalizationInfo *info) {
 
-  float* x = (float*) inputX;
-  float* s = (float*) scale;
-  float* b = (float*) inputB;
-  float* m = (float*) mean;
-  float* v = (float*) var;
-  float* o = (float*) output;
+  float *x = (float *)inputX;
+  float *s = (float *)scale;
+  float *b = (float *)inputB;
+  float *m = (float *)mean;
+  float *v = (float *)var;
+  float *o = (float *)output;
 
-  Dimensions dim = CreateDimensions(info->inputDims,info->numberInputDims);
+  Dimensions dim = CreateDimensions(info->inputDims, info->numberInputDims);
 
-  if(dim.size <= 1){
-    Dimensions_AppendInPlace(&dim,1);
+  if (dim.size <= 1) {
+    Dimensions_AppendInPlace(&dim, 1);
   }
 
-  AddressGen addrInst = StartAddressFromDims(dim,2);
-  AddressGen* addr = &addrInst;
+  AddressGen addrInst = StartAddressFromDims(dim, 2);
+  AddressGen *addr = &addrInst;
 
   // TODO: We probably can also do this using the Kernel stuff.
   //       But I kinda want a better interface when using kernel stuff.
-  Dimensions leftover = Dimensions_Cut_GetRight(dim,2);
+  Dimensions leftover = Dimensions_Cut_GetRight(dim, 2);
   int size = Dimensions_TotalSize(leftover);
 
-  while(Address_IsValid(addr)){
-    int c = Address_GetDim(addr,1);
-    
+  while (Address_IsValid(addr)) {
+    int c = Address_GetDim(addr, 1);
+
     int index = Address_GetValue(addr);
-    
-    for(int i = 0; i < size; i++){
-      o[index + i] = ((x[index + i] - m[c]) * my_invsqrt(v[c] + info->epsilon)) * s[c] + b[c];
+
+    for (int i = 0; i < size; i++) {
+      o[index + i] =
+          ((x[index + i] - m[c]) * my_invsqrt(v[c] + info->epsilon)) * s[c] +
+          b[c];
     }
 
     Address_Advance(addr);
   }
 
   return o;
+}
+
+void *Software_Dropout(void *input, void *out, int index, DropoutInfo *info) {
+  // TODO: Need to copy the input, cannot assume that memory will remain valid.
+  // NOTE: If we want to avoid the copy need to put logic on onnx script that
+  // removes the operator call.
+  return input;
+}
+
+void *Software_LRN(void *input, void *out, int index, LRNInfo *info) {
+  int N = info->inputDims[0];
+  int C = info->inputDims[1];
+  int Y = info->inputDims[2];
+  int X = info->inputDims[3];
+
+  int n = info->size;
+  double k = (double)info->bias;
+  double a = (double)info->alpha;
+  double b = (double)info->beta;
+
+  float *in = (float *)input;
+  float *output = (float *)out;
+
+#define CEIL_DIV(A, B) ((A + B - 1) / B)
+
+  AddressGen addrInst =
+      StartAddress(info->inputDims, info->inputDims, info->numberInputDims);
+  AddressGen *addr = &addrInst;
+  int loopCount = 0;
+  for (; Address_IsValid(addr); Address_Advance(addr)) {
+    int c = Address_GetDim(addr, 1);
+
+    int lowerBound = MAX(0, c - n / 2);
+    int upperBound = MIN(C - 1, c + CEIL_DIV(n, 2));
+
+    KernelGen genInst =
+        StartKernel_IterateOneDimOnly(addr, 1, lowerBound, upperBound);
+    KernelGen *gen = &genInst;
+
+    double sum = 0.0f;
+    for (; Kernel_IsValid(gen); Kernel_Advance(gen)) {
+      int index = Kernel_GetValue(gen);
+
+      double val = (double)in[index];
+
+      sum += (val * val);
+    }
+
+    int index = Address_GetValue(addr);
+
+    double div = SOFT_POW(k + (a / n) * sum, b);
+    output[index] = (((double)in[index]) / div);
+  }
+
+#undef CEIL_DIV
+
+  return output;
+}
+
+void *Software_Gemm(void *inA, void *inB, void *inC, void *out, int index,
+                    GemmInfo *info) {
+  // TODO: Implement this.
+  return out;
 }

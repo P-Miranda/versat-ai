@@ -9,23 +9,15 @@
 // Global stuff (versat side)
 
 uint64_t Versat_DefaultMeasureTime() { return 0; }
-int Versat_DefaultPrintFunction(const char *name, ...) { return 0; }
 void Versat_DefaultClearCache(void *ptr, size_t size) {}
 
 MeasureTimeFunction versat_time = Versat_DefaultMeasureTime;
-PrintFunction versat_printf = Versat_DefaultPrintFunction;
 ClearCache versat_clearCache = Versat_DefaultClearCache;
 
 MeasureTimeFunction
 Versat_SetTimeMeasurementFunction(MeasureTimeFunction func) {
   MeasureTimeFunction old = versat_time;
   versat_time = func;
-  return old;
-}
-
-PrintFunction Versat_SetPrintFunction(PrintFunction func) {
-  PrintFunction old = versat_printf;
-  versat_printf = func;
   return old;
 }
 
@@ -72,18 +64,18 @@ void Dimensions_AppendInPlace(Dimensions *dim, int value) {
   dim->size += 1;
 }
 
-Dimensions Dimensions_Cut_GetLeft(Dimensions dim,int amount){
+Dimensions Dimensions_Cut_GetLeft(Dimensions dim, int amount) {
   Dimensions res = {};
 
-  if(amount == 0){
+  if (amount == 0) {
     res.data[0] = 1;
     res.size = 1;
     return res;
   }
-  
-  int size = MIN(dim.size,amount);
-  
-  for(int i = 0; i < size; i++){
+
+  int size = MIN(dim.size, amount);
+
+  for (int i = 0; i < size; i++) {
     res.data[i] = dim.data[i];
   }
   res.size = size;
@@ -91,17 +83,17 @@ Dimensions Dimensions_Cut_GetLeft(Dimensions dim,int amount){
   return res;
 }
 
-Dimensions Dimensions_Cut_GetRight(Dimensions dim,int amount){
+Dimensions Dimensions_Cut_GetRight(Dimensions dim, int amount) {
   Dimensions res = {};
 
-  if(amount == dim.size){
+  if (amount == dim.size) {
     res.data[0] = 1;
     res.size = 1;
     return res;
   }
 
-  int size = MAX(dim.size - amount,0);
-  for(int i = 0; i < size; i++){
+  int size = MAX(dim.size - amount, 0);
+  for (int i = 0; i < size; i++) {
     res.data[i] = dim.data[amount + i];
   }
   res.size = size;
@@ -151,8 +143,8 @@ AddressGen StartAddressFromDims(Dimensions dims, int iterDims) {
   return gen;
 }
 
-int Address_GetDim(AddressGen *gen,int index){
-  Assert(index < gen->numberDims,"Index greater than dimensions of Address");
+int Address_GetDim(AddressGen *gen, int index) {
+  Assert(index < gen->numberDims, "Index greater than dimensions of Address");
   return gen->addressVars[index];
 }
 
@@ -319,6 +311,19 @@ KernelGen StartKernel(AddressGen *address, int *kernelDims, int kernelSize) {
   return gen;
 }
 
+KernelGen StartKernel_IterateOneDimOnly(AddressGen *address, int dimToIterate,
+                                        int start, int end) {
+  int dims[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+
+  KernelGen gen = StartKernel(address, dims, address->numberDims);
+
+  gen.addressGenVars[dimToIterate] = 0;
+  gen.kernelDims[dimToIterate] = end;
+  gen.kernelVars[dimToIterate] = start;
+
+  return gen;
+}
+
 void Kernel_PrintShort(KernelGen *gen) {
   versat_printf(
       "Kernel is gonna iterate the base tensor in the following coordinates:");
@@ -350,15 +355,6 @@ void Kernel_Print(KernelGen *gen) {
     versat_printf("%ld", gen->kernelDims[i]);
   }
   versat_printf("]");
-
-  versat_printf(" [");
-  for (int i = 0; i < gen->numberDims; i++) {
-    if (i != 0) {
-      versat_printf(" x ");
-    }
-    versat_printf("%ld", gen->kernelDims[i]);
-  }
-  versat_printf("]\n");
 
   versat_printf(" [");
   for (int i = 0; i < gen->numberDims; i++) {
@@ -516,7 +512,7 @@ void AssertAlmostEqual(void *toTest, void *correctValues, int index,
 
 #ifndef LOW_OUTPUT
   if (printOk && incorrectFound == 0) {
-    versat_printf("[%s] (Layer %d) - OK\n", info->typeName, index);
+    versat_printf("[%30s] (Layer %4d) - OK\n", info->typeName, index);
   }
 #endif
 }
@@ -771,6 +767,17 @@ WindowGen StartWindowGen(ExtraInfo *info, bool iterateC, bool isNCHW) {
   res.info = info;
   res.iterateC = iterateC;
   res.isNCHW = isNCHW;
+  res.advanceC = 1;
+  return res;
+}
+
+WindowGen StartAdvancedWindowGen(ExtraInfo *info, bool iterateC, bool isNCHW,
+                                 int cMaxAdvance) {
+  WindowGen res = {};
+  res.info = info;
+  res.iterateC = iterateC;
+  res.isNCHW = isNCHW;
+  res.advanceC = cMaxAdvance;
   return res;
 }
 
@@ -836,7 +843,15 @@ AdvancedWindow WindowGen_Get(WindowGen *gen) {
 
   // For now, just like the rest of the window, we only advance a single output
   // channel
-  res.outputSizeC = 1;
+  res.outputSizeC = gen->advanceC;
+
+  if (res.outputSizeC + res.outputC >= gen->info->outputImageC) {
+    res.outputSizeC = gen->info->outputImageC - res.outputC;
+    if (res.outputSizeC <= 0) {
+      versat_printf("ERROR, CANNOT HAVE OUTPUT SIZE LOWER OR EQUAL TO 0: %d",
+                    res.outputSizeC);
+    }
+  }
 
   // By default, input equals kernel size
   res.actualKernelW = gen->info->kernelW;
@@ -882,6 +897,12 @@ AdvancedWindow WindowGen_Get(WindowGen *gen) {
     int offset = (res.inputY + res.actualKernelH) - gen->info->inputImageH;
     res.actualKernelH -= offset;
     res.padding |= PaddingRegion_BOTTOM;
+  }
+
+  // In this case we are inside the entirity of the padding section, which means
+  // that we do not actually want to do anything. It should just be zero, right?
+  if (res.actualKernelH <= 0 || res.actualKernelW <= 0) {
+    res.entireWindowInsidePadding = true;
   }
 
   return res;

@@ -1,124 +1,116 @@
-addressGen DataSimple(xWidth,yWidth,zWidth,aWidth,bWidth,cWidth){
-   for c 0..cWidth:
-   for b 0..bWidth:
-   for a 0..aWidth:
-   for z 0..zWidth:
-   for y 0..yWidth:
-   for x 0..xWidth:
-   addr = ((((c * bWidth + b) * aWidth + a) * zWidth + z) * yWidth + y) * xWidth + x;
-}
-
-addressGen DataBroadCasted(cEnable,cLoop,bEnable,bLoop,cWidth,aEnable,aLoop,bWidth,zEnable,zLoop,aWidth,yEnable,yLoop,zWidth,xEnable,xLoop,yWidth){
-   for c 0..cLoop:
-   for b 0..bLoop:
-   for a 0..aLoop:
-   for z 0..zLoop:
-   for y 0..yLoop:
-   for x 0..xLoop:
-   addr = ((((c * cEnable * cWidth + b * bEnable) * bWidth + a * aEnable) * aWidth + z * zEnable) * zWidth + y * yEnable) * yWidth + x * xEnable;
-}
-
-addressGen Broadcast1(size,enable){
-   for x 0..size:
-   addr = x * enable;
-}
-
-addressGen Linear(size){
-   for x 0..size:
-   addr = x;
-}
-
 module Top_Add(){
-   using(DataBroadCasted,Linear,Broadcast1) VRead inputs[2];
-   using(DataSimple,Linear) VWrite output;
+   VRead inputs_0;
+   VRead inputs_1;
+   VWrite output;
    F_Add adder;
 #
-   inputs[0..1] -> adder:0..1;
+   {inputs_0,inputs_1} -> adder:0..1;
    adder -> output;
+##
+   config Linear(addr: Address,size){
+      for x 0..size {
+         inputs_0 = addr[x];
+      }
+   }
+
+   config Broadcast(addr: Address,size,enable){
+      for x 0..size { 
+         inputs_1 = addr[x * enable];
+      }
+   }
+
+   config Output(addr: Address,size){
+      for x 0..size {
+         output = addr[x];
+      }
+   }
 }
 
 module Top_Relu(){
-   using(Linear) VRead input;
-   using(Linear) VWrite output;
+   VRead input;
+   VWrite output;
    Relu relu;
 #
    input -> relu;
-   relu -> output;   
-}
-
-// Output space
-addressGen Linear2(startX,startY,startOffset,sizeW,sizeH,outputImageW,stride){
-   for y 0..sizeH:
-   for x 0..sizeW:
-   addr = ((y + startY) * outputImageW + (x + startX) + startOffset) / stride;
-}
-
-// Should be Input space but I think some values in here are output space
-addressGen MaxPool2D(startX,startY,startOffset,kernelW,kernelH,imageWidth,sizeW,sizeH,strideW,strideH){
-   for y  0..sizeH:
-   for x  0..sizeW:
-   for ky 0..kernelH:
-   for kx 0..kernelW:
-   addr = startOffset + (y * strideH + startY + ky) * imageWidth + x * strideW + startX + kx;
+   relu -> output;
+##
+   config Simple(inAddr: Address,outAddr: Address,size){
+      for x 0..size {
+         input = inAddr[x];
+         output = outAddr[x];
+      }
+   }
 }
 
 module Top_Maxpool(){
-   using(MaxPool2D) VRead features;
+   VRead features;
    F_AccumMax accum;
-   using(Linear2) VWrite output;
+   VWrite output;
 #   
    features -> accum;
    accum -> output;
+##
+   config Features(addr: Address,startX,startY,startOffset,kernelW,kernelH,imageWidth,sizeW,sizeH,strideW,strideH){
+      for y  0..sizeH {
+         for x  0..sizeW {
+            for ky 0..kernelH {
+               for kx 0..kernelW {
+                  features = addr[startOffset + (y * strideH + startY + ky) * imageWidth + x * strideW + startX + kx];
+               }
+            }
+         }
+      }
+   }
+
+   config Output(addr: Address,startX,startY,startOffset,sizeW,sizeH,outputImageW,stride){
+      for y 0..sizeH {
+         for x 0..sizeW {
+            output = addr[((y + startY) * outputImageW + (x + startX) + startOffset) / stride];
+         }
+      }
+   }
 }
 
 module Top_AveragePool(){
-   using(MaxPool2D) VRead features;
+   VRead features;
    MyFloatAccum averagePool_accum;
-   F_Mul inversedDiv; // Because divisor comes from an input, easier to multiple by 1/divisor then bringing an division unit
+   F_Mul inversedDiv; // Easier to multiply by (1/divisor) than to bring a div unit.
    Const invertedDivisor;
-   using(Linear2) VWrite output;
+   VWrite output;
 #   
    features -> averagePool_accum;
    {averagePool_accum,invertedDivisor} -> inversedDiv:0..1;
    inversedDiv -> output;
-}
+##
+   config Features(addr: Address,startX,startY,startOffset,kernelW,kernelH,imageWidth,sizeW,sizeH,strideW,strideH){
+      for y  0..sizeH {
+         for x  0..sizeW {
+            for ky 0..kernelH {
+               for kx 0..kernelW {
+                  features = addr[startOffset + (y * strideH + startY + ky) * imageWidth + x * strideW + startX + kx];
+               }
+            }
+         }
+      }
+   }
 
-addressGen Conv2D_NHWC(startX,startY,sizeW,sizeH,inputImageW,inputImageC,sizeC,features,startC){
-   for d 0..features:
-   for c 0..sizeC:
-   for ky 0..sizeH:
-   for kx 0..sizeW:
-   addr = (startY + ky) * inputImageW * inputImageC + (startX + kx) * inputImageC + (c + startC);
-}
-
-addressGen Weight2D(startX,startY,sizeW,sizeH,kernelW,kernelH,inputChannels,sizeC,features,startC,startD){
-   for d 0..features:
-   for c 0..sizeC:
-   for y 0..sizeH:
-   for x 0..sizeW:
-   addr = (d + startD) * inputChannels * kernelW * kernelH + (c + startC) * kernelW * kernelH + (y + startY) * kernelW + (x + startX);
-}
-
-addressGen Linear2_NHWC(startX,startY,height,width,startC,outputChannels,outputSize,outputWidth,stride){
-   for y 0..height:
-   for x 0..width:
-   for c 0..outputSize:
-   addr = ((y + startY) * outputWidth * outputChannels + (x + startX) * outputChannels + startC + c) / stride;
-}
-
-addressGen LinearStrided(size,stride){
-   for x 0..size:
-   addr = x / stride;
+   config Output(addr: Address,startX,startY,startOffset,sizeW,sizeH,outputImageW,stride){
+      for y 0..sizeH {
+         for x 0..sizeW {
+            output = addr[((y + startY) * outputImageW + (x + startX) + startOffset) / stride];
+         }
+      }
+   }
 }
 
 module Top_Conv(){
-   using(Conv2D_NHWC) VRead features;
-   using(Weight2D) VRead weights;
-   using(LinearStrided) VRead bias;
+   VRead #(.ADDR_W(18)) features;
+   VRead #(.ADDR_W(18)) weights;
+   VRead bias;
    F_Mul muller;
    F_Add addBias;
    MyFloatAccum myAccum;
-   using(Linear2_NHWC) VWrite output;
+   VWrite output;
 #   
    {weights,features} -> muller:0..1;
    muller -> myAccum;
@@ -126,63 +118,72 @@ module Top_Conv(){
    {myAccum,bias} -> addBias:0..1;
    addBias -> output;
 ##
-   config Features(addr,startX,startY,sizeW,sizeH,inputImageW,inputImageC,sizeC,features,startC){
-      for d 0..features {
+   config FeaturesWeightsOutputs(inputX : Address,inputW : Address,outAddr : Address,
+      actualKernelW : Fixed,actualKernelH : Fixed,sizeC : Fixed,
+      outputH : Dyn,outputW : Dyn,featuresAmount : Dyn,
+
+      startX,startY,
+      kernelStartX,kernelStartY,
+      startD,outStartX,
+      outStartY,
+      inputImageW,inputImageC,
+      startC,
+      kernelW,kernelH,
+      outputWidth,stride,outputChannels){
+
+      for d 0..featuresAmount {
          for c 0..sizeC {
-            for ky 0..sizeH {
-               for kx 0..sizeW { 
-                  features = addr[(startY + ky) * inputImageW * inputImageC + (startX + kx) * inputImageC + (c + startC)];
+            for ky 0..actualKernelH {
+               for kx 0..actualKernelW { 
+                  features = inputX[(startY + ky) * inputImageW * inputImageC + (startX + kx) * inputImageC + (c + startC)];
+                  weights = inputW[(d + startD) * inputImageC * kernelW * kernelH + (c + startC) * kernelW * kernelH + (ky + kernelStartY) * kernelW + (kx + kernelStartX)];
                }
+            }
+         }
+      }
+      for y 0..outputH {
+         for x 0..outputW {
+            for c 0..featuresAmount {
+              output = outAddr[((y + outStartY) * outputWidth * outputChannels + (x + outStartX) * outputChannels + startD + c) / stride];
             }
          }
       }
    }
 
-   config Weight2D(addr,startX,startY,sizeW,sizeH,kernelW,kernelH,inputChannels,sizeC,features,startC,startD){
-      for d 0..features {
-         for c 0..sizeC {
-            for y 0..sizeH {
-               for x 0..sizeW {
-                  weights = addr[(d + startD) * inputChannels * kernelW * kernelH + (c + startC) * kernelW * kernelH + (y + startY) * kernelW + (x + startX)];
-               }
-            }
-         }
-      }
-   }
-
-   config Bias(addr,size,stride){
+   config Bias(addr : Address,size,stride){
       for x 0..size {
          bias = addr[x / stride];
-      }
-   }
-
-   config Output(addr,startX,startY,height,width,startC,outputChannels,outputSize,outputWidth,stride){
-      for y 0..height {
-         for x 0..width {
-            for c 0..outputSize {
-              output = addr[((y + startY) * outputWidth * outputChannels + (x + startX) * outputChannels + startC + c) / stride];
-            }
-         }
       }
    }
 }
 
 module Top_MatMul(){
-   using(Linear) VRead leftRow;
-   using(Linear) VRead rightRow;
+   VRead leftRow;
+   VRead rightRow;
    F_Mul mat_muller;
    MyFloatAccum myAccum;
-   using(LinearStrided) VWrite output;
+   VWrite output;
 #
    {leftRow,rightRow} -> mat_muller:0..1;
    mat_muller -> myAccum;
    myAccum -> output;
+##
+   config Simple(leftAddr: Address,rightAddr: Address,size: Dyn){
+      for x 0..size {
+         leftRow = leftAddr[x];
+         rightRow = rightAddr[x];
+      }
+   }   
+
+   config Output(addr: Address,size,stride){
+      for x 0..size {
+         output = addr[x / stride];
+      }
+   }
 }
 
 module Top_BatchNormalization(){
    VRead x;
-   //VRead A;
-   //VRead B;
    VWrite o;
 
    Const A;
@@ -196,7 +197,7 @@ module Top_BatchNormalization(){
 
    add -> o;
 ##
-   config Simple(input,output,index,size,aVal,bVal) {
+   config Simple(input : Address,output : Address,index,size : Dyn,aVal,bVal) {
       A.constant = aVal;
       B.constant = bVal;
       for i 0..size {
@@ -206,4 +207,48 @@ module Top_BatchNormalization(){
    }
 }
 
-merge Test = Top_Add | Top_Relu | Top_Maxpool | Top_Conv | Top_AveragePool | Top_MatMul | Top_BatchNormalization;
+module Top_Gemm(){
+   VRead #(.ADDR_W(14)) gemmLeftRow;
+   VRead #(.ADDR_W(14)) gemmRightRow;
+   F_Mul mat_muller;
+   MyFloatAccum myAccum;
+   VWrite output;
+
+   Const alpha;
+   F_Mul alphaMul;
+
+   Const cValue;
+   F_Add adder;
+#
+   {gemmLeftRow,gemmRightRow} -> mat_muller:0..1;
+   mat_muller -> myAccum;
+
+   {myAccum,alpha} -> alphaMul:0..1;
+
+   {alphaMul,cValue} -> adder:0..1;
+
+   adder -> output;
+##
+   config Alpha(val){
+      alpha.constant = val;
+   }
+
+   config CValue(val){
+      cValue.constant = val;
+   }
+
+   config Simple(leftAddr: Address,rightAddr: Address,size: Dyn){
+      for x 0..size {
+         gemmLeftRow = leftAddr[x];
+         gemmRightRow = rightAddr[x];
+      }
+   }
+
+   config Output(addr: Address,size,stride){
+      for x 0..size {
+         output = addr[x / stride];
+      }
+   }
+}
+
+merge Test = Top_Add | Top_Relu | Top_Maxpool | Top_Conv | Top_AveragePool | Top_MatMul | Top_BatchNormalization | Top_Gemm;

@@ -5,7 +5,7 @@
 
 def setup(py_params: dict):
     # Py2hwsw dictionary describing current core
-    mem_addr_w = 26
+    mem_addr_w = 25
     system_w = mem_addr_w
     name = "versat_ai"
     addr_w = 32
@@ -43,7 +43,7 @@ def setup(py_params: dict):
             "s0_axi_s": "cpu_ibus",
             "s1_axi_s": "cpu_dbus",
             "s2_axi_s": "versat_axi",
-            # "s3_axi_s": "eth_axi", #ETHERNET: Commented this line
+            # "s3_axi_s": "eth_axi",  # ETHERNET: Commented this line
             # Manager interfaces connected below
         },
         "addr_w": addr_w,

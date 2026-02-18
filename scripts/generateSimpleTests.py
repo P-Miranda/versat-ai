@@ -10,7 +10,7 @@ from onnx.helper import (
 from onnx.checker import check_model
 from skl2onnx.helpers.onnx_helper import save_onnx_model
 from onnx import numpy_helper
-from dataclasses import dataclass,fields
+from dataclasses import dataclass, fields
 from onnxOperators import BroadCastShape, ExtendShape
 
 import sys
@@ -18,6 +18,8 @@ import numpy as np
 import onnxruntime as ort
 import os
 import shutil
+import hashlib
+import random
 
 tests = []
 testList = []
@@ -30,6 +32,7 @@ class Test:
     node: any = None
     randomArrays: list[any] = None
     initializerArrays: list[any] = None
+
 
 @dataclass
 class PaddingType:
@@ -58,13 +61,16 @@ class ConvArgs:
 
         if self.features % self.group != 0:
             return False
+        # NOTE: Seems weird but onnxruntime complains.
+        # TODO: Check if for group == 1 if we can remove this check.
+        #       Maybe it only matters for group > 1
         if (self.features * self.group) != inputChannels:
             return False
         if ((self.features * self.group) % inputChannels) != 0:
             return False
         return True
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         s = self
 
@@ -137,8 +143,6 @@ class ConvArgs:
         randomArray0 = np.random.randn(*shape).astype(np.float32)
         randomArray1 = np.random.randn(*kernelShape).astype(np.float32)
 
-        linear = False
-
         val = 1.0
         if linear:
             randomArray0 = np.zeros(shape).astype(np.float32)
@@ -174,7 +178,7 @@ class BinaryOpArgs:
     rightShape: list[int]
     forcedOutputShape: list[int]
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -189,12 +193,13 @@ class BinaryOpArgs:
             outputShape = self.forcedOutputShape
 
         numberInputs = 2
-        shapes = [self.leftShape,self.rightShape]
+        shapes = [self.leftShape, self.rightShape]
 
         inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
-        test.tensors = [make_tensor_value_info(
-            x, TensorProto.FLOAT, shapes[i]
-        ) for i,x in enumerate(inputs)]            
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
 
         test.outputTensor = make_tensor_value_info(
             GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
@@ -215,7 +220,7 @@ class UnaryOpArgs:
     op: str
     shape: list[int]
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -230,9 +235,10 @@ class UnaryOpArgs:
         shapes = [self.shape]
 
         inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
-        test.tensors = [make_tensor_value_info(
-            x, TensorProto.FLOAT, shapes[i]
-        ) for i,x in enumerate(inputs)]            
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
 
         test.outputTensor = make_tensor_value_info(
             GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
@@ -242,7 +248,7 @@ class UnaryOpArgs:
             inputs,
             [GetOutputTrueName(testIndex)],
         )
-        
+
         test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
 
         tests.append(test)
@@ -256,7 +262,7 @@ class MaxPoolArgs:
     auto_pad: str = "NOTSET"
     pads: list[int] = None
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -308,7 +314,7 @@ class AveragePoolArgs:
     auto_pad: str = "NOTSET"
     pads: list[int] = None
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -359,7 +365,7 @@ class ReshapeArgs:
     shapeIn: list[int]
     shapeOut: list[int]
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -395,14 +401,17 @@ class ReshapeArgs:
 @dataclass
 class TransposeArgs:
     shapeIn: list[int]
-    shapeOut: list[int]
+    permutations: list[int]
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
         shapeIn = self.shapeIn
-        shapeOut = self.shapeOut
+        shapeOut = [0] * len(self.shapeIn)
+
+        for i, perm in enumerate(self.permutations):
+            shapeOut[i] = shapeIn[perm]
 
         test = Test()
 
@@ -418,7 +427,7 @@ class TransposeArgs:
             "Transpose",
             [GetInputTrueName(testIndex, 0)],
             [GetOutputTrueName(testIndex)],
-            perm=shapeOut,
+            perm=self.permutations,
         )
 
         randomArray = np.random.randn(*shapeIn).astype(np.float32)
@@ -432,7 +441,7 @@ class SoftmaxArgs:
     shape: list[int]
     axis: int
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -462,13 +471,14 @@ class SoftmaxArgs:
 
         tests.append(test)
 
+
 @dataclass(frozen=True)
 class BatchNormalizationArgs:
     shape: list[int]
     epsilon: float
     momentum: float
 
-    def Create(self):
+    def Create(self, linear=False):
         global tests
         testIndex = len(tests)
 
@@ -484,12 +494,13 @@ class BatchNormalizationArgs:
         test = Test()
 
         numberInputs = 5
-        shapes = [self.shape,[C],[C],[C],[C]]
+        shapes = [self.shape, [C], [C], [C], [C]]
 
         inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
-        test.tensors = [make_tensor_value_info(
-            x, TensorProto.FLOAT, shapes[i]
-        ) for i,x in enumerate(inputs)]            
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
 
         test.outputTensor = make_tensor_value_info(
             GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
@@ -499,12 +510,13 @@ class BatchNormalizationArgs:
             inputs,
             [GetOutputTrueName(testIndex)],
             epsilon=self.epsilon,
-            momentum=self.momentum
+            momentum=self.momentum,
         )
-        
+
         test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
 
         tests.append(test)
+
 
 def GetInputTrueName(testIndex, inputIndex):
     VARS = "XYZABC"
@@ -575,9 +587,11 @@ def CreateSoftmax(shape, axis=-1):
     global testList
     testList.append(SoftmaxArgs(shape, axis))
 
-def CreateBatchNormalization(shape, epsilon=None,momentum=None):
+
+def CreateBatchNormalization(shape, epsilon=None, momentum=None):
     global testList
-    testList.append(BatchNormalizationArgs(shape,epsilon,momentum))
+    testList.append(BatchNormalizationArgs(shape, epsilon, momentum))
+
 
 def CreateBinaryOpDynamicTest(leftShape, rightShape, actualLeft, actualRight):
     global tests
@@ -615,111 +629,286 @@ def CreateBinaryOpDynamicTest(leftShape, rightShape, actualLeft, actualRight):
     tests.append(test)
 
 
+@dataclass(frozen=True)
+class LRNArgs:
+    shape: list[int]
+    size: int
+    alpha: float
+    beta: float
+    bias: float
+
+    def Create(self, linear=False):
+        global tests
+        testIndex = len(tests)
+
+        maxDims = len(self.shape)
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        test = Test()
+
+        numberInputs = 1
+        shapes = [self.shape]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "LRN",
+            inputs,
+            [GetOutputTrueName(testIndex)],
+            alpha=self.alpha,
+            beta=self.beta,
+            bias=self.bias,
+            size=self.size,
+        )
+
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        tests.append(test)
+
+
+def CreateLRN(shape, size, alpha, beta, bias):
+    global testList
+    testList.append(LRNArgs(shape, size, alpha, beta, bias))
+
+
+@dataclass(frozen=True)
+class DropoutArgs:
+    shape: list[int]
+    ratio: float
+
+    def Create(self, linear=False):
+        global tests
+        testIndex = len(tests)
+
+        maxDims = len(self.shape)
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        test = Test()
+
+        numberInputs = 1
+        shapes = [self.shape]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "Dropout",
+            inputs,
+            [GetOutputTrueName(testIndex)],
+            ratio=self.ratio,
+        )
+
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        tests.append(test)
+
+
+def CreateLRN(shape, size, alpha, beta, bias):
+    global testList
+    testList.append(LRNArgs(shape, size, alpha, beta, bias))
+
+
+def CreateDropout(shape, ratio):
+    global testList
+    testList.append(DropoutArgs(shape, ratio))
+
+
+@dataclass
+class GemmArgs:
+    aShape: list[int]
+    bShape: list[int]
+    cShape: list[int]
+    alpha: float
+    beta: float
+    transA: int
+    transB: int
+
+    def IsValid(self):
+        aShape = self.aShape
+        if self.transA:
+            aShape = [aShape[1], aShape[0]]
+        bShape = self.bShape
+        if self.transB:
+            bShape = [bShape[1], bShape[0]]
+        cShape = self.cShape
+        if not self.cShape:
+            cShape = [1, 1]
+
+        outShape = [aShape[0], bShape[1]]
+
+        if aShape[1] != bShape[0]:
+            return False
+        if cShape[0] != 1 and cShape[0] != outShape[0]:
+            return False
+        if cShape[1] != 1 and cShape[1] != outShape[1]:
+            return False
+        return True
+
+    def Create(self, linear=False):
+        global tests
+        testIndex = len(tests)
+
+        assert self.IsValid()
+
+        test = Test()
+
+        maxDims = max(len(self.aShape), len(self.bShape))
+
+        # Let onnx infer shape specifics
+        outputShape = [None] * maxDims
+
+        cShape = self.cShape
+        if not self.cShape:
+            cShape = [1, 1]
+
+        numberInputs = 3
+        shapes = [self.aShape, self.bShape, cShape]
+
+        inputs = [GetInputTrueName(testIndex, x) for x in range(numberInputs)]
+        test.tensors = [
+            make_tensor_value_info(x, TensorProto.FLOAT, shapes[i])
+            for i, x in enumerate(inputs)
+        ]
+
+        test.outputTensor = make_tensor_value_info(
+            GetOutputTrueName(testIndex), TensorProto.FLOAT, outputShape
+        )
+        test.node = make_node(
+            "Gemm",
+            inputs,
+            [GetOutputTrueName(testIndex)],
+            alpha=self.alpha,
+            beta=self.beta,
+            transA=self.transA,
+            transB=self.transB,
+        )
+
+        test.randomArrays = [np.random.randn(*x).astype(np.float32) for x in shapes]
+
+        if not self.cShape:
+            test.randomArrays[2] = np.zeros(cShape).astype(np.float32)
+
+        tests.append(test)
+
+
+def CreateGemm(aShape, bShape, cShape=None, alpha=1.0, beta=1.0, transA=0, transB=0):
+    global testList
+    testList.append(GemmArgs(aShape, bShape, cShape, alpha, beta, transA, transB))
+
+
 def GenerateSimpleTest():
     testComplexity = 0
 
-    # MARK
+    # MARK1
+    testAdd = 0
+    testRelu = 0
+    testReshape = 0
+    testTranspose = 0
+    testMaxPool = 0
+    testAveragePool = 0
+    testMatMul = 0
+    testDropout = 0
+    testGemm = 0
 
-    testAdd = False
-    testRelu = False
-    testReshape = False
-    testSoftmax = False
-    testTranspose = False
-    testMaxPool = True
-    testAveragePool = True
-    testMatMul = True
-    testConv = False
-    testBatchNormalization = False
+    testConv = 1
+    testBatchNormalization = 1
 
-    testBig = False
-    generativeTests = False
+    testSoftmax = 0
+    testLRN = 0
 
-    if False:
-        n = 1  # Batches
-        c = 1  # Input channels
-        f = 1  # Output channels
-        hw = [4, 4]  # Image height and width
-        k = [2, 2]  # 2D Kernel
-        s = [2, 2]  # 2D Stride
-        d = [1, 1]  # 2D Dilations
-        g = 1  # Groups
-        b = False  # Use bias
-        p = "NOTSET"  # Padding Kind
-        pd = [0, 0, 0, 0]  # Actual padding used when NOTSET
+    generativeTests = 1
+    testBig = 0
 
-        # 0
-        CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
+    if testGemm:
+        CreateGemm([4, 1], [1, 4], [1, 4], 2.0, 2.0, 1, 0)
 
-    if False:
-        n = 1  # Batches
-        c = 1  # Input channels
-        f = 1  # Output channels
-        hw = [4, 4]  # Image height and width
-        k = [2, 2]  # 2D Kernel
-        s = [2, 2]  # 2D Stride
-        d = [1, 1]  # 2D Dilations
-        g = 1  # Groups
-        b = False  # Use bias
-        p = "NOTSET"  # Padding Kind
-        pd = [0, 0, 0, 0]  # Actual padding used when NOTSET
+        if False:
+            CreateGemm([1, 2], [2, 3], [1, 1], 2.0, 2.0)
+            CreateGemm([1, 4], [4, 1], [1, 1], 2.0, 2.0)
+            CreateGemm([4, 1], [1, 4], [1, 1], 2.0, 2.0)
+            CreateGemm([4, 1], [1, 4], [4, 1], 2.0, 2.0)
+            CreateGemm([4, 1], [1, 4], [1, 4], 2.0, 2.0)
+            CreateGemm([4, 1], [1, 4], [4, 4], 2.0, 2.0)
 
-        # 0
-        CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
-        # 1
-        CreateConvolution([2, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
-        # 2
-        CreateConvolution([n, 2, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
-        # 3
-        CreateConvolution([n, c, hw[0], hw[1]], 2, k, s, d, g, b, p, pd)
-        # 4
-        # CreateConvolution([n, c, hw[0], hw[1]], f, [4, 4], s, d, g, b, p, pd)
-        # 5
-        # CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
-        # 6
-        # CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, b, p, pd)
-        # 7
-        # CreateConvolution([n, 2, hw[0], hw[1]], 2, k, s, d, 2, b, p, pd)
-        # 8
-        # CreateConvolution([n, c, hw[0], hw[1]], f, k, s, d, g, True, p, pd)
-        # 9
-        # CreateConvolution([n, 2, hw[0], hw[1]], 4, k, s, d, 2, b, p, pd)
-        # 10
-        # CreateConvolution([n, 4, hw[0], hw[1]], 2, k, s, d, 2, b, p, pd)
-        # CreateConvolution([n, 8, hw[0], hw[1]], 2, k, s, d, 2, b, p, pd)
-        # CreateConvolution([n, 8, hw[0], hw[1]], 4, k, s, d, 2, b, p, pd)
-        # CreateConvolution([n, 16, hw[0], hw[1]], 4, k, s, d, 2, b, p, pd)
-        # CreateConvolution([n, 16, hw[0], hw[1]], 8, k, s, d, 2, b, p, pd)
-        # CreateConvolution([n, 16, hw[0], hw[1]], 8, k, s, d, 4, b, p, pd)
-        # CreateConvolution([n, 16, hw[0], hw[1]], 8, k, s, d, 8, b, p, pd)
-        # CreateConvolution([n, 8, hw[0], hw[1]], 16, k, s, d, 8, b, p, pd)
-        # CreateConvolution([n, 4, hw[0], hw[1]], 16, k, s, d, 4, b, p, pd)
-        # CreateConvolution([n, 4, hw[0], hw[1]], 8, k, s, d, 4, b, p, pd)
-        # CreateConvolution([n, 4, hw[0], hw[1]], 12, k, s, d, 4, b, p, pd)
-        # CreateConvolution([n, 12, hw[0], hw[1]], 12, k, s, d, 4, b, p, pd)
-        # CreateConvolution([n, 12, hw[0], hw[1]], 8, k, s, d, 4, b, p, pd)
+        if generativeTests:
+            aShapes = [[4, 1], [4, 2], [4, 4], [2, 4], [1, 4]]
+            bShapes = [[1, 4], [2, 4], [4, 4], [4, 2], [4, 1]]
+            cShapes = [None, [1, 1], [2, 1], [1, 2], [4, 1], [1, 4]]
+            alphas = [1.0, 2.0]
+            betas = [1.0, 2.0]
+            transA = [0, 1]
+            transB = [0, 1]
+
+            for a in aShapes:
+                for b in bShapes:
+                    for c in cShapes:
+                        for alpha in alphas:
+                            for beta in betas:
+                                for tA in transA:
+                                    for tB in transB:
+                                        CreateGemm(a, b, c, alpha, beta, tA, tB)
+
+    if testLRN:
+        CreateLRN([1, 4, 4, 4], int(3), 0.0001, 0.75, 1.0)
+
+        CreateLRN([1, 11, 6, 6], int(5), 0.0001, 0.75, 1.0)
+        CreateLRN([1, 11, 8, 8], int(5), 0.0001, 0.75, 1.0)
+        CreateLRN([1, 11, 10, 10], int(5), 0.0001, 0.75, 1.0)
+        CreateLRN([1, 6, 3, 3], int(5), 0.0001, 0.75, 1.0)
+        CreateLRN([1, 6, 5, 5], int(5), 0.0001, 0.75, 1.0)
+        CreateLRN([1, 7, 1, 1], int(3), 0.0001, 0.65, 1.5)
+        CreateLRN([1, 7, 3, 3], int(3), 0.0001, 0.65, 1.5)
+        CreateLRN([1, 7, 5, 5], int(3), 0.0001, 0.65, 1.5)
+        CreateLRN([1, 11, 1, 1], int(5), 0.0002, 0.85, 2.0)
+        CreateLRN([1, 11, 3, 3], int(5), 0.0002, 0.85, 2.0)
+        CreateLRN([1, 11, 5, 5], int(5), 0.0002, 0.85, 2.0)
+
+    if testDropout:
+        # No point in complex tests, dropout in inference is just a copy from input to output.
+        CreateDropout([1, 1, 1, 1], 0.5)
+        CreateDropout([1, 1, 2, 2], 0.5)
+        CreateDropout([1, 2, 2, 2], 0.5)
+        CreateDropout([4, 4, 4, 4], 1.0)
 
     if testBatchNormalization:
-        for t in [2,10]:
-            CreateBatchNormalization([1,1,1,1])
-            CreateBatchNormalization([1,1,1,t])
-            CreateBatchNormalization([1,1,t,1])
-            CreateBatchNormalization([1,t,1,1])
-            CreateBatchNormalization([t,1,1,1])
-            CreateBatchNormalization([1,1,t,t])
-            CreateBatchNormalization([1,t,1,t])
-            CreateBatchNormalization([t,1,1,t])
-            CreateBatchNormalization([1,t,t,1])
-            CreateBatchNormalization([2,1,t,1])
-            CreateBatchNormalization([t,t,1,1])
-            CreateBatchNormalization([t,t,1,1])
-            CreateBatchNormalization([1,t,t,t])
-            CreateBatchNormalization([t,1,t,t])
-            CreateBatchNormalization([t,t,1,t])
-            CreateBatchNormalization([t,t,t,1])
-            CreateBatchNormalization([t,t,t,t])
+        for t in [2, 10]:
+            CreateBatchNormalization([1, 1, 1, 1])
+            CreateBatchNormalization([1, 1, 1, t])
+            CreateBatchNormalization([1, 1, t, 1])
+            CreateBatchNormalization([1, t, 1, 1])
+            CreateBatchNormalization([t, 1, 1, 1])
+            CreateBatchNormalization([1, 1, t, t])
+            CreateBatchNormalization([1, t, 1, t])
+            CreateBatchNormalization([t, 1, 1, t])
+            CreateBatchNormalization([1, t, t, 1])
+            CreateBatchNormalization([2, 1, t, 1])
+            CreateBatchNormalization([t, t, 1, 1])
+            CreateBatchNormalization([t, t, 1, 1])
+            CreateBatchNormalization([1, t, t, t])
+            CreateBatchNormalization([t, 1, t, t])
+            CreateBatchNormalization([t, t, 1, t])
+            CreateBatchNormalization([t, t, t, 1])
+            CreateBatchNormalization([t, t, t, t])
 
         # Big examples to trigger memory exhaustion problems.
-        CreateBatchNormalization([2,2,100,100])
+        CreateBatchNormalization([2, 2, 100, 100])
 
     if testSoftmax:
         # Softmax axis come in pairs.
@@ -770,25 +959,24 @@ def GenerateSimpleTest():
         CreateSoftmax([w, z, y, x], 3)  # D
 
     if testAdd:
-        if True:
-            CreateBinaryOpTest("Add", [1], [1])
-            CreateBinaryOpTest("Add", [2], [2])
-            CreateBinaryOpTest("Add", [3, 2], [3, 2])
-            CreateBinaryOpTest("Add", [4, 5], [2, 3, 4, 5])
+        CreateBinaryOpTest("Add", [1], [1])
+        CreateBinaryOpTest("Add", [2], [2])
+        CreateBinaryOpTest("Add", [3, 2], [3, 2])
+        CreateBinaryOpTest("Add", [4, 5], [2, 3, 4, 5])
 
-            # Simplest tests, no broadcast or abusing dimensions
-            CreateBinaryOpTest("Add", [1], [1])
-            CreateBinaryOpTest("Add", [4], [4])
-            CreateBinaryOpTest("Add", [2, 4], [2, 4])
-            CreateBinaryOpTest("Add", [2, 4, 6], [2, 4, 6])
-            CreateBinaryOpTest("Add", [2, 4, 6, 8], [2, 4, 6, 8])
+        # Simplest tests, no broadcast or abusing dimensions
+        CreateBinaryOpTest("Add", [1], [1])
+        CreateBinaryOpTest("Add", [4], [4])
+        CreateBinaryOpTest("Add", [2, 4], [2, 4])
+        CreateBinaryOpTest("Add", [2, 4, 6], [2, 4, 6])
+        CreateBinaryOpTest("Add", [2, 4, 6, 8], [2, 4, 6, 8])
 
-            # Broadcasting
-            CreateBinaryOpTest("Add", [2, 3, 4, 5], [1])
-            CreateBinaryOpTest("Add", [2, 3, 4, 5], [5])
-            CreateBinaryOpTest("Add", [4, 5], [2, 3, 4, 5])
-            CreateBinaryOpTest("Add", [1, 4, 5], [2, 3, 1, 1])
-            CreateBinaryOpTest("Add", [3, 4, 5], [2, 1, 1, 1])
+        # Broadcasting
+        CreateBinaryOpTest("Add", [2, 3, 4, 5], [1])
+        CreateBinaryOpTest("Add", [2, 3, 4, 5], [5])
+        CreateBinaryOpTest("Add", [4, 5], [2, 3, 4, 5])
+        CreateBinaryOpTest("Add", [1, 4, 5], [2, 3, 1, 1])
+        CreateBinaryOpTest("Add", [3, 4, 5], [2, 1, 1, 1])
 
         if testBig:
             CreateBinaryOpTest("Add", [10240], [10240])
@@ -1026,20 +1214,27 @@ def GenerateSimpleTest():
         # Input shape, features, kernel, stride, dilations, bias
         if generativeTests or False:
             nP = [1, 2]
-            aP = [[3, 3], [5, 5], [16, 16]]
-            cP = [1, 3, 4, 6, 8, 16]
-            fP = [1, 3, 4, 6, 8, 16]
+            aP = [[3, 3], [5, 5]]
+            cP = [1, 3, 4]
+            fP = [1, 3, 4]
             kP = [[3, 3], [5, 5]]
-            sP = [[3, 3], [5, 5], [9, 9]]
+            sP = [[3, 3], [5, 5]]
             dP = [[1, 1]]
             bP = [False, True]
             pP = [
                 PaddingType("NOTSET", [1, 1, 1, 1]),
                 PaddingType("NOTSET", [4, 2, 1, 6]),
             ]
+
+            if testBig:
+                aP = [[3, 3], [5, 5]]
+                cP = [1, 3, 4, 6, 8, 16]        
+                fP = [1, 3, 4, 6, 8, 16]        
+                sP = [[3, 3], [5, 5], [9, 9]]
+
             # pP = [PaddingType("SAME_LOWER"), PaddingType("SAME_UPPER"), PaddingType("NOTSET",[1,1,1,1])]
+            # gP = [1, 2, 3, 4, 8]
             gP = [1, 2, 3, 4, 8]
-            # gP = [2]
 
             args = []
             for n in nP:
@@ -1213,10 +1408,12 @@ def GenerateSimpleTest():
         # if testComplexity == 2 or testBig or False:
         #    CreateConvolution([1, 1, 100, 100], 1, [100, 100], [100, 100], d, g, True)
 
+
 def MakeHashable(val):
-    if(type(val) == list):
+    if type(val) == list:
         val = tuple(MakeHashable(x) for x in val)
     return val
+
 
 def GenerateTest(outputPath):
     global testList
@@ -1224,33 +1421,39 @@ def GenerateTest(outputPath):
 
     GenerateSimpleTest()
 
-    if False:
-        testToFocus = 1
+    testList = [x for x in testList if not hasattr(x, "IsValid") or x.IsValid()]
+
+    # MARK2
+    focusOnOneTest = 0
+
+    # MARK3
+    if 0:
+        random.shuffle(testList)
+
+    if 0:
+        testList = testList[0:70]
+
+    if focusOnOneTest:
+        testToFocus = 64
+
         testList = [testList[testToFocus]]
         print(testList[0])
 
-    # TODO: Make the seed be an hash of the test, thus ensuring it is reproducible if we end up changing things in the future.
-    for test in testList:
+    for i, test in enumerate(testList):
         hashable = {}
         for field in fields(test):
             val = getattr(test, field.name)
             val = MakeHashable(val)
             hashable[field.name] = val
 
-        h = hash(frozenset(hashable.items())) % 2**31
-        np.random.seed(h)
-        test.Create()
-
-    """
-    for test in tests:
-        val = 1.0
-        sign = 1.0
-        for array in test.randomArrays:
-            for i, x in np.ndenumerate(array):
-                array[i] = val
-                val += 1.0 * sign
-                sign = -sign
-    """
+        persistantHash = int(
+            hashlib.md5(
+                str(hashable).encode("UTF-8"), usedforsecurity=False
+            ).hexdigest(),
+            16,
+        )
+        np.random.seed(persistantHash % (2**31))
+        test.Create(focusOnOneTest)
 
     allInputNodesAndValuesInOrder = []
     for x in tests:

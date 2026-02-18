@@ -1,0 +1,2 @@
+We added the 'entireWindowInsidePadding' field to the AdvancedWindow struct but still need to add the logic to
+every place that needs it. We can also try to figure out if we can find a simpler way of doing this but I doubt it.

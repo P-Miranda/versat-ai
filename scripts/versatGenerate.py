@@ -11,7 +11,6 @@ def RunVersat(versat_spec, versat_top, versat_extra, build_dir, axi_data_w, debu
     versat_args = [
         "versat",
         os.path.realpath(versat_spec),
-        "-s",
         f"-b{axi_data_w}",
         "-p",
         "iob_csrs_",

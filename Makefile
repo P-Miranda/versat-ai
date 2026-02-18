@@ -20,7 +20,7 @@ BUILD_DIR ?= $(shell nix-shell --run "py2hwsw $(CORE) print_build_dir")
 
 USE_INTMEM ?= 0
 USE_EXTMEM ?= 1
-INIT_MEM ?= 0
+INIT_MEM ?= 1
 
 VERSION ?=$(shell cat versat_ai.py | grep version | cut -d '"' -f 4)
 

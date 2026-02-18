@@ -74,7 +74,7 @@ BOARD_SERIAL_PORT ?=/dev/usb-uart
 CONSOLE_CMD ?=$(PYTHON_DIR)/console.py -s $(BOARD_SERIAL_PORT)
 
 #board client command
-GRAB_TIMEOUT ?= 300
+GRAB_TIMEOUT ?= 1000
 BOARD_GRAB_CMD=../../scripts/board_client.py grab $(GRAB_TIMEOUT)
 
 #run fpga image
